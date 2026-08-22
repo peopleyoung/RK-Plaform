@@ -1,0 +1,85 @@
+ARG BASE_IMAGE=python:3.11-slim-bookworm
+FROM ${BASE_IMAGE} AS trainer-root
+
+ENV DEBIAN_FRONTEND=noninteractive PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    UV_NO_CACHE=1 UV_LINK_MODE=copy
+ARG DEBIAN_MIRROR=http://deb.debian.org
+RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+      -exec sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR}|g" {} + && \
+    apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update && \
+    apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends libglib2.0-0 libgl1 libgomp1 && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /opt/rknode
+
+ARG PYTHON_INDEX_URL=https://pypi.org/simple
+ARG PADDLE_INDEX_URL=https://pypi.org/simple
+RUN python3 -m pip install --no-cache-dir --index-url "${PYTHON_INDEX_URL}" uv==0.8.4
+COPY deploy/paddleocr-constraints.txt /opt/frameworks/paddleocr-constraints.txt
+ARG PADDLE_PACKAGE=paddlepaddle==3.2.2
+ARG EXPECTED_PADDLE_VERSION=3.2.2
+ARG EXPECTED_PADDLE_CUDA=false
+RUN uv venv --python python3 --system-site-packages /opt/venv && \
+    if ! /opt/venv/bin/python -c "import paddle" 2>/dev/null; then \
+      uv pip install --no-cache --python /opt/venv/bin/python \
+        --default-index "${PYTHON_INDEX_URL}" \
+        --index "${PADDLE_INDEX_URL}" \
+        --index-strategy unsafe-best-match \
+        --constraint /opt/frameworks/paddleocr-constraints.txt "${PADDLE_PACKAGE}"; \
+    fi && \
+    uv pip install --no-cache --python /opt/venv/bin/python \
+      --default-index "${PYTHON_INDEX_URL}" \
+      --constraint /opt/frameworks/paddleocr-constraints.txt \
+      fastapi uvicorn pydantic onnx==1.16.2 paddle2onnx==1.3.1
+ARG PADDLEOCR_COMMIT=8cce9b6fd7ccb50226d0c38f94054d81c29b8184
+COPY third_party/training/SOURCES.lock /opt/frameworks/SOURCES.lock
+COPY third_party/training/paddleocr /opt/frameworks/paddleocr
+RUN test -f /opt/frameworks/paddleocr/tools/train.py \
+    && grep -Fx "paddleocr ${PADDLEOCR_COMMIT}" /opt/frameworks/SOURCES.lock \
+    && uv pip install --no-cache --python /opt/venv/bin/python \
+      --default-index "${PYTHON_INDEX_URL}" \
+      --constraint /opt/frameworks/paddleocr-constraints.txt \
+      -r /opt/frameworks/paddleocr/requirements.txt \
+    && uv pip check --python /opt/venv/bin/python \
+    && if [ "${EXPECTED_PADDLE_CUDA}" = "true" ]; then \
+      /opt/venv/bin/python -c \
+        "from importlib.metadata import version; from pathlib import Path; expected='${EXPECTED_PADDLE_VERSION}'; actual=version('paddlepaddle-gpu'); assert actual == expected, (actual, expected); assert (Path('/opt/venv/lib/python3.11/site-packages/paddle/base/libpaddle.so')).is_file(); assert version('nvidia-cuda-runtime-cu12'); print(actual, 'cuda-wheel')"; \
+    else \
+      for attempt in 1 2 3; do \
+        PYTHONPATH=/opt/frameworks/paddleocr /opt/venv/bin/python -c \
+          "import paddle; from ppocr.data import build_dataloader; from ppocr.modeling.architectures import build_model; expected='${EXPECTED_PADDLE_VERSION}'; assert paddle.__version__ == expected, (paddle.__version__, expected); assert not paddle.device.is_compiled_with_cuda(), paddle.device.is_compiled_with_cuda(); print(paddle.__version__, paddle.device.is_compiled_with_cuda())"; \
+      done; \
+    fi
+
+COPY backend ./backend
+COPY workers ./workers
+COPY config ./config
+
+RUN rm -rf /root/.cache /tmp/* /var/tmp/* /var/lib/apt/lists/* \
+      /usr/local/bin/uv /usr/local/lib/python3.11/site-packages/uv-* \
+      /opt/venv/lib/python3.11/site-packages/paddle/include \
+      /opt/conda/pkgs /opt/conda/lib/python3.11/site-packages/paddle/include && \
+    find /opt/venv /opt/conda/lib/python3.11/site-packages /opt/frameworks \
+      -type d -name __pycache__ -prune -exec rm -rf '{}' + 2>/dev/null || true
+
+FROM scratch
+COPY --from=trainer-root / /
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    PATH=/opt/venv/bin:/opt/conda/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
+    LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64 \
+    NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    RKNODE_PADDLEOCR_ROOT=/opt/frameworks/paddleocr
+
+WORKDIR /opt/rknode
+ARG RKNODE_RELEASE_VERSION=dev
+ARG RKNODE_SOURCE_REVISION=unknown
+ARG RKNODE_IMAGE_VARIANT=paddle
+LABEL org.opencontainers.image.title="RKNode Paddle Trainer" \
+      org.opencontainers.image.version="${RKNODE_RELEASE_VERSION}" \
+      org.opencontainers.image.revision="${RKNODE_SOURCE_REVISION}" \
+      io.rknode.component="trainer" \
+      io.rknode.framework="paddle" \
+      io.rknode.variant="${RKNODE_IMAGE_VARIANT}" \
+      io.rknode.offline-ready="true"
+
+CMD ["python", "-m", "workers.trainer.main"]

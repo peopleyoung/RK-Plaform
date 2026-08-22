@@ -1,0 +1,22 @@
+inputs:
+  - /assets/test.jpg
+
+capture:
+  node: VideoCaptureNode
+  loop: false
+  perf: 1
+
+detect:
+  node: InferNode
+  instance: bytetrack
+  interval: 1
+  perf: 1
+  link_to:
+    - capture
+
+result:
+  node: JsonOutputNode
+  instance: bytetrack
+  output: /output/bytetrack.jsonl
+  link_to:
+    - detect

@@ -1,0 +1,45 @@
+platform_yolo:
+  instance_name: rknn_yolo
+  model_path: /models/releases/release-id/model.rknn
+  label_path: /models/releases/release-id/labels.txt
+  confidence_threshold: 0.4
+  nms_threshold: 0.5
+  # Rockchip's official YOLO split-head export already emits sigmoid scores.
+  # Set true only for a model whose class head contains raw logits.
+  class_scores_logits: false
+  queue_capacity: 8
+  max_detections: 1024
+  type: YOLO_DFL_SPLIT
+  enable: 1
+
+platform_deeplab:
+  instance_name: rknn_structured
+  model_path: /models/releases/deeplab-release-id/model.rknn
+  label_path: /models/releases/deeplab-release-id/labels.txt
+  queue_capacity: 8
+  type: DEEPLAB_LOGITS
+  enable: 1
+
+platform_ppocr_det:
+  instance_name: rknn_structured
+  model_path: /models/releases/ppocr-det-release-id/model.rknn
+  binary_threshold: 0.3
+  box_threshold: 0.6
+  unclip_ratio: 1.5
+  min_size: 3
+  max_candidates: 1000
+  max_regions: 100
+  queue_capacity: 8
+  type: PPOCR_DB
+  enable: 1
+
+platform_ppocr_rec:
+  instance_name: rknn_structured
+  model_path: /models/releases/ppocr-rec-release-id/model.rknn
+  label_path: /models/releases/ppocr-rec-release-id/labels.txt
+  blank_index: 0
+  # The platform ppocr_ctc_logits_v1 contract exposes raw logits.
+  ctc_scores_logits: true
+  queue_capacity: 8
+  type: PPOCR_CTC
+  enable: 1

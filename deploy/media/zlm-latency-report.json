@@ -1,0 +1,25 @@
+{
+  "gates": {
+    "hasSamples": true,
+    "latencyP95Ms": true,
+    "overlaySkewP95Frames": true,
+    "queueAgeMs": true,
+    "queueDepth": true,
+    "reconnectMs": true
+  },
+  "latencyMs": {
+    "max": 0.0,
+    "p50": 0.0,
+    "p95": 0.0
+  },
+  "maxQueueAgeMs": 0.0,
+  "maxQueueDepth": 1,
+  "overlaySkewFrames": {
+    "max": 0.0,
+    "p95": 0.0
+  },
+  "passed": true,
+  "reconnectDurationMs": 0.0,
+  "sampleCount": 1,
+  "schemaVersion": 1
+}

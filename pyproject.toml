@@ -1,0 +1,50 @@
+[project]
+name = "rknode-platform"
+version = "0.1.0"
+description = "RK3588 model training and RKNN conversion platform"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.116.0,<1",
+  "httpx>=0.28.0,<1",
+  "pydantic>=2.11.0,<3",
+  "pydantic-settings>=2.10.0,<3",
+  "python-multipart>=0.0.20,<1",
+  "sqlalchemy>=2.0.40,<3",
+  "uvicorn>=0.35.0,<1",
+]
+
+[dependency-groups]
+dev = [
+  "onnx>=1.18.0,<2",
+  "pillow>=11.0,<13",
+  "pyright>=1.1.403,<2",
+  "pytest>=8.4.0,<9",
+  "python-pptx>=1.0.2,<2",
+  "pyyaml>=6.0.2,<7",
+  "ruff>=0.12.0,<1",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["backend", "workers", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+include = ["backend", "workers"]
+exclude = ["**/__pycache__"]
+venvPath = "."
+venv = ".venv"
+reportMissingTypeStubs = false

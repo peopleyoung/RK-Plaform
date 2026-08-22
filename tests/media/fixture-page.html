@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RKNode media fixture</title>
+    <style>
+      html, body { margin: 0; background: #101417; color: #fff; font-family: sans-serif; }
+      #surface { position: relative; width: 640px; height: 360px; }
+      video, canvas { position: absolute; inset: 0; width: 640px; height: 360px; }
+      #status { position: absolute; left: 8px; bottom: 8px; z-index: 2; }
+    </style>
+  </head>
+  <body>
+    <div id="surface">
+      <video id="video" muted playsinline></video>
+      <canvas id="overlay" width="640" height="360"></canvas>
+      <span id="status">connecting</span>
+    </div>
+    <script type="module" src="/tests/media/fixture-player.ts"></script>
+  </body>
+</html>

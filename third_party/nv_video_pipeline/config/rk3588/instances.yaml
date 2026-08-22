@@ -1,0 +1,21 @@
+bytetrack:
+  instance_name: rknn_yolo
+  model_path: /models/bytetrack_s.rknn
+  label_path: /opt/video-pipeline/labels/mot.labels
+  confidence_threshold: 0.4
+  nms_threshold: 0.5
+  queue_capacity: 8
+  max_detections: 1024
+  type: ByteTrack
+  enable: 1
+
+hat:
+  instance_name: rknn_yolo
+  model_path: /models/aqm.rknn
+  label_path: /opt/video-pipeline/labels/hat.labels
+  confidence_threshold: 0.4
+  nms_threshold: 0.5
+  queue_capacity: 8
+  max_detections: 1024
+  type: V5
+  enable: 1

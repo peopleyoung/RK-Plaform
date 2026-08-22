@@ -1,0 +1,34 @@
+FROM python:3.12-slim AS api-builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_HTTP_TIMEOUT=300 \
+    UV_NO_CACHE=1 UV_LINK_MODE=copy
+WORKDIR /app
+
+COPY pyproject.toml uv.lock ./
+ARG PYTHON_INDEX_URL=https://pypi.org/simple
+RUN python3 -m pip install --no-cache-dir --index-url "${PYTHON_INDEX_URL}" uv==0.8.4 && \
+    UV_DEFAULT_INDEX="${PYTHON_INDEX_URL}" uv sync --frozen --no-dev --no-cache
+
+COPY backend ./backend
+COPY config ./config
+RUN rm -rf /root/.cache /tmp/* && \
+    find /app/.venv -type d -name __pycache__ -prune -exec rm -rf '{}' +
+
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+COPY --from=api-builder /app/.venv /app/.venv
+COPY --from=api-builder /app/backend /app/backend
+COPY --from=api-builder /app/config /app/config
+
+ARG RKNODE_RELEASE_VERSION=dev
+ARG RKNODE_SOURCE_REVISION=unknown
+LABEL org.opencontainers.image.title="RKNode Platform API" \
+      org.opencontainers.image.version="${RKNODE_RELEASE_VERSION}" \
+      org.opencontainers.image.revision="${RKNODE_SOURCE_REVISION}" \
+      io.rknode.component="platform-api" \
+      io.rknode.offline-ready="true"
+
+EXPOSE 8000
+CMD [".venv/bin/uvicorn", "backend.platform_api.app:app", "--host", "0.0.0.0", "--port", "8000"]

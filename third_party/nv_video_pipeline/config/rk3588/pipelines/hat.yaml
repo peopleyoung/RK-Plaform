@@ -1,0 +1,22 @@
+inputs:
+  - /assets/test.jpg
+
+capture:
+  node: VideoCaptureNode
+  loop: false
+  perf: 1
+
+detect:
+  node: InferNode
+  instance: hat
+  interval: 1
+  perf: 1
+  link_to:
+    - capture
+
+result:
+  node: JsonOutputNode
+  instance: hat
+  output: /output/hat.jsonl
+  link_to:
+    - detect

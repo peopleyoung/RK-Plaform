@@ -1,0 +1,1457 @@
+from __future__ import annotations
+
+import hashlib
+from datetime import UTC, datetime
+from typing import Any
+
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+
+from backend.platform_api.db_models import (
+    ArtifactRecord,
+    InferenceNodeRecord,
+    InferenceTaskRecord,
+    JobRecord,
+    ModelReleaseRecord,
+    NodeCleanupRecord,
+    ServiceEndpointRecord,
+)
+from backend.platform_api.service import new_id
+from tests.conftest import ADMIN_HEADERS
+
+
+def _manifest(training_job_id: str) -> dict[str, Any]:
+    return {
+        "schemaVersion": 1,
+        "modelFamily": "DeepLabV3+",
+        "profileId": "deeplabv3plus",
+        "variant": "mobilenet_v2_rknn",
+        "taskType": "semantic_segmentation",
+        "trainingJobId": training_job_id,
+        "onnxSha256": "a" * 64,
+        "opset": 12,
+        "resolution": {"width": 512, "height": 512},
+        "input": {
+            "name": "images",
+            "layout": "NCHW",
+            "shape": [1, 3, 512, 512],
+            "dtype": "float32",
+            "colorSpace": "RGB",
+        },
+        "preprocessing": {
+            "mean": [127.5, 127.5, 127.5],
+            "std": [127.5, 127.5, 127.5],
+        },
+        "resizePolicy": "stretch",
+        "outputContract": "semantic_logits_nchw_v1",
+        "outputs": [{"name": "output", "semantic": "semantic_logits"}],
+        "labels": ["background", "scratch"],
+        "supportedPrecisions": ["int8", "fp16"],
+        "rknn": {
+            "targetPlatform": "rk3588",
+            "quantizedAlgorithm": "normal",
+            "optimizationLevel": 3,
+            "requiresCalibrationFor": ["int8"],
+        },
+    }
+
+
+def _seed_succeeded_conversion(client: TestClient) -> tuple[str, str]:
+    context = client.app.state.context
+    now = datetime.now(UTC)
+    training_job_id = new_id("train")
+    conversion_job_id = new_id("convert")
+    source_id = new_id("artifact")
+    rknn_id = new_id("artifact")
+    validation_id = new_id("artifact")
+    manifest = _manifest(training_job_id)
+    onnx_bytes = b"onnx-model"
+    rknn_bytes = b"rknn-model"
+    validation_bytes = b'{"passed": true}'
+
+    with context.database.session() as session:
+        session.add(
+            JobRecord(
+                id=training_job_id,
+                type="training",
+                name="seed training",
+                status="succeeded",
+                profile_id="deeplabv3plus",
+                dataset_id=None,
+                worker_id=None,
+                progress=100,
+                stage="completed",
+                spec_json={},
+                result_json={},
+                created_at=now,
+                updated_at=now,
+                completed_at=now,
+            )
+        )
+        session.add(
+            JobRecord(
+                id=conversion_job_id,
+                type="conversion",
+                name="seed conversion",
+                status="succeeded",
+                profile_id="deeplabv3plus",
+                dataset_id=None,
+                worker_id=None,
+                progress=100,
+                stage="validated",
+                spec_json={
+                    "manifest": manifest,
+                    "precision": "fp16",
+                    "sourceArtifact": {"id": source_id},
+                },
+                result_json={
+                    "deploymentReady": True,
+                    "validation": {"passed": True, "inferenceSamples": 3},
+                },
+                created_at=now,
+                updated_at=now,
+                completed_at=now,
+            )
+        )
+        for artifact_id, job_id, kind, filename, content, artifact_manifest in (
+            (source_id, training_job_id, "onnx", "deeplab.onnx", onnx_bytes, manifest),
+            (rknn_id, conversion_job_id, "rknn", "deeplab.rknn", rknn_bytes, None),
+            (
+                validation_id,
+                conversion_job_id,
+                "validation_report",
+                "validation.json",
+                validation_bytes,
+                None,
+            ),
+        ):
+            storage_key = f"artifacts/{artifact_id}/{filename}"
+            path = context.storage.resolve(storage_key)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+            session.add(
+                ArtifactRecord(
+                    id=artifact_id,
+                    job_id=job_id,
+                    kind=kind,
+                    filename=filename,
+                    storage_key=storage_key,
+                    media_type="application/octet-stream",
+                    size_bytes=len(content),
+                    sha256=hashlib.sha256(content).hexdigest(),
+                    manifest_json=artifact_manifest,
+                    created_at=now,
+                )
+            )
+    return conversion_job_id, rknn_id
+
+
+def _register_active_node(
+    client: TestClient,
+    adapter: str,
+    *,
+    suffix: str = "01",
+    features: list[str] | None = None,
+) -> tuple[str, str]:
+    created = client.post(
+        "/api/v1/inference-nodes",
+        headers=ADMIN_HEADERS,
+        json={"name": f"rk3588-test-{suffix}", "maxModelInstances": 2},
+    )
+    assert created.status_code == 201, created.text
+    node = created.json()
+    registration = client.post(
+        "/api/v1/inference-agent/register",
+        json={
+            "nodeId": node["id"],
+            "registrationToken": node["registrationToken"],
+            "hardwareId": f"rk3588-test-hw-{suffix}",
+            "runtimeVersion": "rknn-runtime-2.3.2",
+            "driverVersion": "rknpu2",
+            "pipelineVersion": "test-pipeline",
+            "adapters": [adapter],
+            "metadata": {"features": features} if features is not None else {},
+        },
+    )
+    assert registration.status_code == 201, registration.text
+    access_token = registration.json()["accessToken"]
+    heartbeat = client.post(
+        f"/api/v1/inference-agent/nodes/{node['id']}/heartbeat",
+        headers={"Authorization": f"Bearer {access_token}"},
+        json={"health": "healthy", "selfTestPassed": True, "actualRevision": 0},
+    )
+    assert heartbeat.status_code == 200, heartbeat.text
+    approved = client.post(
+        f"/api/v1/inference-nodes/{node['id']}/approve", headers=ADMIN_HEADERS
+    )
+    assert approved.status_code == 200, approved.text
+    summary = client.get("/api/v1/inference-summary", headers=ADMIN_HEADERS)
+    assert summary.status_code == 200, summary.text
+    assert summary.json()["totalNodes"] >= 1
+    assert summary.json()["onlineNodes"] == summary.json()["totalNodes"]
+    return node["id"], access_token
+
+
+def _published_release(client: TestClient) -> tuple[dict[str, Any], str]:
+    conversion_job_id, artifact_id = _seed_succeeded_conversion(client)
+    created = client.post(
+        "/api/v1/model-releases",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "deeplabv3plus-mobilenet-v2",
+            "version": conversion_job_id,
+            "conversionJobId": conversion_job_id,
+        },
+    )
+    assert created.status_code == 201, created.text
+    published = client.post(
+        f"/api/v1/model-releases/{created.json()['id']}/publish",
+        headers=ADMIN_HEADERS,
+    )
+    assert published.status_code == 200, published.text
+    return published.json(), artifact_id
+
+
+def _published_yolo_release(client: TestClient) -> tuple[dict[str, Any], str]:
+    release, artifact_id = _published_release(client)
+    context = client.app.state.context
+    with context.database.session() as session:
+        record = session.get(ModelReleaseRecord, release["id"])
+        assert record is not None
+        manifest = dict(record.manifest_json)
+        manifest.update(
+            {
+                "profileId": "yolov8",
+                "modelFamily": "YOLO",
+                "taskType": "object_detection",
+                "outputContract": "rknn_yolo_dfl_split_heads_v1",
+                "labels": ["person", "helmet", "vehicle"],
+            }
+        )
+        record.profile_id = "yolov8"
+        record.task_type = "object_detection"
+        record.adapter = "yolo_dfl_split_v1"
+        record.manifest_json = manifest
+    release.update(
+        {
+            "profileId": "yolov8",
+            "taskType": "object_detection",
+            "adapter": "yolo_dfl_split_v1",
+            "manifest": manifest,
+        }
+    )
+    return release, artifact_id
+
+
+def test_release_node_task_deployment_and_agent_artifact_access(client: TestClient) -> None:
+    release, artifact_id = _published_release(client)
+    node_id, access_token = _register_active_node(client, "deeplab_logits_v1")
+
+    task = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "line-a-segmentation",
+            "releaseId": release["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/line-a",
+            "npuCoreMask": "core1",
+            "npuCorePolicy": "exclusive",
+        },
+    )
+    assert task.status_code == 201, task.text
+    deployment = client.post(
+        "/api/v1/deployments",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "line-a-rollout",
+            "releaseId": release["id"],
+            "taskIds": [task.json()["id"]],
+            "strategy": "all_at_once",
+        },
+    )
+    assert deployment.status_code == 201, deployment.text
+    target = deployment.json()["targets"][0]
+    assert target["desiredRevision"] == 1
+    agent_headers = {"Authorization": f"Bearer {access_token}"}
+    desired = client.get(
+        f"/api/v1/inference-agent/nodes/{node_id}/desired", headers=agent_headers
+    )
+    assert desired.status_code == 200, desired.text
+    assert desired.json()["releases"][0]["artifact"]["id"] == artifact_id
+    assert desired.json()["releases"][0]["manifest"]["labels"] == ["background", "scratch"]
+    assert desired.json()["tasks"][0]["npuCoreMask"] == "core1"
+    assert desired.json()["tasks"][0]["npuCorePolicy"] == "exclusive"
+
+    states = ["downloading", "verifying", "staged", "draining", "activating", "warming", "healthy"]
+    for state in states:
+        report = client.post(
+            f"/api/v1/inference-agent/nodes/{node_id}/targets/{target['id']}/status",
+            headers=agent_headers,
+            json={
+                "revision": target["desiredRevision"],
+                "state": state,
+                "progress": 100 if state == "healthy" else 50,
+                "stage": state,
+            },
+        )
+        assert report.status_code == 200, report.text
+    final_task = client.get(
+        f"/api/v1/inference-tasks?page=1&pageSize=20", headers=ADMIN_HEADERS
+    )
+    assert final_task.status_code == 200
+    assert final_task.json()["items"][0]["status"] == "running"
+    downloaded = client.get(
+        f"/api/v1/inference-agent/nodes/{node_id}/artifacts/{artifact_id}/download",
+        headers=agent_headers,
+    )
+    assert downloaded.status_code == 200
+    assert downloaded.content == b"rknn-model"
+
+
+def test_inference_task_context_worker_counts_round_trip_and_validate(
+    client: TestClient,
+) -> None:
+    release, _ = _published_release(client)
+    node_id, _ = _register_active_node(
+        client, "deeplab_logits_v1", suffix="pool-contract"
+    )
+
+    default_task = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "default-pool",
+            "releaseId": release["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/default-pool",
+        },
+    )
+    assert default_task.status_code == 201, default_task.text
+    assert default_task.json()["contextCount"] == 1
+    assert default_task.json()["workerCount"] == 1
+
+    explicit_task = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "parallel-pool",
+            "releaseId": release["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/parallel-pool",
+            "contextCount": 3,
+            "workerCount": 2,
+        },
+    )
+    assert explicit_task.status_code == 201, explicit_task.text
+    assert explicit_task.json()["contextCount"] == 3
+    assert explicit_task.json()["workerCount"] == 2
+
+    for invalid_counts in (
+        {"contextCount": 0, "workerCount": 1},
+        {"contextCount": 1, "workerCount": 0},
+        {"contextCount": 1, "workerCount": 2},
+    ):
+        invalid = client.post(
+            "/api/v1/inference-tasks",
+            headers=ADMIN_HEADERS,
+            json={
+                "name": "invalid-pool",
+                "releaseId": release["id"],
+                "nodeId": node_id,
+                "inputUri": "rtsp://camera/invalid-pool",
+                **invalid_counts,
+            },
+        )
+        assert invalid.status_code == 422, invalid.text
+
+
+def test_deployment_capacity_counts_primary_contexts(client: TestClient) -> None:
+    release, _ = _published_release(client)
+    node_id, _ = _register_active_node(
+        client, "deeplab_logits_v1", suffix="primary-context-capacity"
+    )
+    task = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "oversized-primary-pool",
+            "releaseId": release["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/oversized-primary-pool",
+            "contextCount": 3,
+            "workerCount": 2,
+        },
+    )
+    assert task.status_code == 201, task.text
+
+    deployment = client.post(
+        "/api/v1/deployments",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "oversized-primary-rollout",
+            "releaseId": release["id"],
+            "taskIds": [task.json()["id"]],
+            "strategy": "all_at_once",
+        },
+    )
+
+    assert deployment.status_code == 409, deployment.text
+    assert deployment.json()["error"]["code"] == "inference_node_capacity_exceeded"
+    assert deployment.json()["error"]["details"]["requiredContexts"] == 3
+    assert deployment.json()["error"]["details"]["maxContexts"] == 2
+
+
+def test_secondary_pool_counts_round_trip_and_consume_context_capacity(
+    client: TestClient,
+) -> None:
+    primary, _ = _published_yolo_release(client)
+    secondary, _ = _published_yolo_release(client)
+    node_id, _ = _register_active_node(
+        client,
+        "yolo_dfl_split_v1",
+        suffix="secondary-context-capacity",
+        features=["secondary_infer"],
+    )
+    analytics = {
+        "secondaryModels": [
+            {
+                "releaseId": secondary["id"],
+                "sourceClassIds": [0],
+                "confidenceThreshold": 0.3,
+                "contextCount": 2,
+                "workerCount": 1,
+            }
+        ]
+    }
+    task = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "secondary-context-pool",
+            "releaseId": primary["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/secondary-context-pool",
+            "analytics": analytics,
+        },
+    )
+    assert task.status_code == 201, task.text
+    assert task.json()["analytics"]["secondaryModels"][0]["contextCount"] == 2
+    assert task.json()["analytics"]["secondaryModels"][0]["workerCount"] == 1
+
+    deployment = client.post(
+        "/api/v1/deployments",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "secondary-context-rollout",
+            "releaseId": primary["id"],
+            "taskIds": [task.json()["id"]],
+            "strategy": "all_at_once",
+        },
+    )
+    assert deployment.status_code == 409, deployment.text
+    assert deployment.json()["error"]["code"] == "inference_node_capacity_exceeded"
+    assert deployment.json()["error"]["details"]["requiredContexts"] == 3
+    assert deployment.json()["error"]["details"]["maxContexts"] == 2
+
+    invalid = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "invalid-secondary-context-pool",
+            "releaseId": primary["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/invalid-secondary-context-pool",
+            "analytics": {
+                "secondaryModels": [
+                    {
+                        **analytics["secondaryModels"][0],
+                        "contextCount": 1,
+                        "workerCount": 2,
+                    }
+                ]
+            },
+        },
+    )
+    assert invalid.status_code == 422, invalid.text
+
+
+def test_exclusive_npu_core_overlap_is_rejected_before_deployment(
+    client: TestClient,
+) -> None:
+    release, _ = _published_release(client)
+    node_id, _ = _register_active_node(client, "deeplab_logits_v1", suffix="core-conflict")
+    context = client.app.state.context
+    with context.database.session() as session:
+        node = session.get(InferenceNodeRecord, node_id)
+        assert node is not None
+        node.max_model_instances = 3
+
+    invalid = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "invalid-exclusive-auto",
+            "releaseId": release["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/invalid",
+            "npuCoreMask": "auto",
+            "npuCorePolicy": "exclusive",
+        },
+    )
+    assert invalid.status_code == 422, invalid.text
+
+    first = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "exclusive-core-0-1",
+            "releaseId": release["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/core-01",
+            "npuCoreMask": "core0_1",
+            "npuCorePolicy": "exclusive",
+        },
+    )
+    assert first.status_code == 201, first.text
+    first_deployment = client.post(
+        "/api/v1/deployments",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "activate-exclusive-core-0-1",
+            "releaseId": release["id"],
+            "taskIds": [first.json()["id"]],
+            "strategy": "all_at_once",
+        },
+    )
+    assert first_deployment.status_code == 201, first_deployment.text
+
+    second = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "shared-core-1",
+            "releaseId": release["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/core-1",
+            "npuCoreMask": "core1",
+            "npuCorePolicy": "shared",
+        },
+    )
+    assert second.status_code == 201, second.text
+    conflict = client.post(
+        "/api/v1/deployments",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "overlapping-core-deployment",
+            "releaseId": release["id"],
+            "taskIds": [second.json()["id"]],
+            "strategy": "all_at_once",
+        },
+    )
+    assert conflict.status_code == 409, conflict.text
+    assert conflict.json()["error"]["code"] == "inference_npu_core_conflict"
+
+
+def test_stopped_inference_task_can_restart_with_a_new_deployment(client: TestClient) -> None:
+    release, _ = _published_release(client)
+    node_id, access_token = _register_active_node(client, "deeplab_logits_v1")
+    created = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "restartable-segmentation",
+            "releaseId": release["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/restartable",
+        },
+    )
+    assert created.status_code == 201, created.text
+    task_id = created.json()["id"]
+
+    restarted = client.post(
+        f"/api/v1/inference-tasks/{task_id}/restart", headers=ADMIN_HEADERS
+    )
+    assert restarted.status_code == 201, restarted.text
+    first_deployment = restarted.json()
+    assert first_deployment["name"] == "Restart restartable-segmentation"
+    assert first_deployment["status"] == "rolling"
+    assert first_deployment["targets"][0]["desiredRevision"] == 1
+
+    duplicate = client.post(
+        f"/api/v1/inference-tasks/{task_id}/restart", headers=ADMIN_HEADERS
+    )
+    assert duplicate.status_code == 409, duplicate.text
+    assert duplicate.json()["error"]["code"] == "inference_task_not_restartable"
+
+    target = first_deployment["targets"][0]
+    healthy = client.post(
+        f"/api/v1/inference-agent/nodes/{node_id}/targets/{target['id']}/status",
+        headers={"Authorization": f"Bearer {access_token}"},
+        json={
+            "revision": target["desiredRevision"],
+            "state": "healthy",
+            "progress": 100,
+            "stage": "healthy",
+        },
+    )
+    assert healthy.status_code == 200, healthy.text
+
+    stopped = client.post(
+        f"/api/v1/inference-tasks/{task_id}/stop", headers=ADMIN_HEADERS
+    )
+    assert stopped.status_code == 200, stopped.text
+    assert stopped.json()["status"] == "stopped"
+    assert stopped.json()["configRevision"] == 2
+    desired = client.get(
+        f"/api/v1/inference-agent/nodes/{node_id}/desired",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert desired.status_code == 200, desired.text
+    assert desired.json()["tasks"] == []
+
+    restarted_again = client.post(
+        f"/api/v1/inference-tasks/{task_id}/restart", headers=ADMIN_HEADERS
+    )
+    assert restarted_again.status_code == 201, restarted_again.text
+    assert restarted_again.json()["targets"][0]["desiredRevision"] == 3
+
+
+def test_failed_inference_task_restart_clears_previous_runtime_error(client: TestClient) -> None:
+    release, _ = _published_release(client)
+    node_id, access_token = _register_active_node(client, "deeplab_logits_v1")
+    task = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "failed-restartable-task",
+            "releaseId": release["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/failed-restartable",
+        },
+    ).json()
+    deployment = client.post(
+        "/api/v1/deployments",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "failed-rollout",
+            "releaseId": release["id"],
+            "taskIds": [task["id"]],
+            "strategy": "all_at_once",
+        },
+    ).json()
+    target = deployment["targets"][0]
+    failed = client.post(
+        f"/api/v1/inference-agent/nodes/{node_id}/targets/{target['id']}/status",
+        headers={"Authorization": f"Bearer {access_token}"},
+        json={
+            "revision": target["desiredRevision"],
+            "state": "failed",
+            "progress": 40,
+            "stage": "activating",
+            "errorCode": "runtime_start_failed",
+            "errorMessage": "runtime could not start",
+        },
+    )
+    assert failed.status_code == 200, failed.text
+
+    restarted = client.post(
+        f"/api/v1/inference-tasks/{task['id']}/restart", headers=ADMIN_HEADERS
+    )
+    assert restarted.status_code == 201, restarted.text
+    assert restarted.json()["id"] != deployment["id"]
+    assert restarted.json()["targets"][0]["desiredRevision"] == 2
+    listed = client.get(
+        "/api/v1/inference-tasks?page=1&pageSize=20", headers=ADMIN_HEADERS
+    )
+    restarted_task = next(
+        item for item in listed.json()["items"] if item["id"] == task["id"]
+    )
+    assert restarted_task["status"] == "deploying"
+    assert restarted_task["errorMessage"] is None
+
+
+def test_desired_state_promotes_labels_from_legacy_release_manifest(client: TestClient) -> None:
+    release, _ = _published_release(client)
+    context = client.app.state.context
+    with context.database.session() as session:
+        record = session.get(ModelReleaseRecord, release["id"])
+        assert record is not None
+        legacy_manifest = dict(record.manifest_json)
+        legacy_manifest.pop("labels", None)
+        record.manifest_json = legacy_manifest
+
+    node_id, access_token = _register_active_node(client, "deeplab_logits_v1", suffix="legacy")
+    task = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "legacy-label-task",
+            "releaseId": release["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/legacy",
+        },
+    )
+    assert task.status_code == 201, task.text
+    deployment = client.post(
+        "/api/v1/deployments",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "legacy-label-rollout",
+            "releaseId": release["id"],
+            "taskIds": [task.json()["id"]],
+            "strategy": "all_at_once",
+        },
+    )
+    assert deployment.status_code == 201, deployment.text
+    desired = client.get(
+        f"/api/v1/inference-agent/nodes/{node_id}/desired",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert desired.status_code == 200, desired.text
+    assert desired.json()["releases"][0]["manifest"]["labels"] == ["background", "scratch"]
+
+
+def test_model_release_prevents_source_job_deletion(client: TestClient) -> None:
+    conversion_job_id, _ = _seed_succeeded_conversion(client)
+    release = client.post(
+        "/api/v1/model-releases",
+        headers=ADMIN_HEADERS,
+        json={"name": "retained-model", "version": "1", "conversionJobId": conversion_job_id},
+    )
+    assert release.status_code == 201, release.text
+    blocked = client.delete(f"/api/v1/jobs/{conversion_job_id}", headers=ADMIN_HEADERS)
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["error"]["code"] == "job_artifacts_published"
+
+
+def test_inference_task_http_output_validation_and_update(client: TestClient) -> None:
+    release, _ = _published_release(client)
+    node_id, _ = _register_active_node(client, "deeplab_logits_v1")
+    base = {
+        "name": "line-a-http",
+        "releaseId": release["id"],
+        "nodeId": node_id,
+        "inputUri": "rtsp://camera/line-a",
+    }
+
+    invalid = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            **base,
+            "output": {"type": "http", "url": "https://user:secret@consumer/results"},
+        },
+    )
+    assert invalid.status_code == 422, invalid.text
+
+    created = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            **base,
+            "output": {
+                "type": "http",
+                "url": "https://consumer.example/results",
+                "authorizationEnv": "RKNODE_RESULT_SINK_TOKEN",
+                "connectTimeoutMs": 500,
+                "requestTimeoutMs": 2000,
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["output"]["type"] == "http"
+
+    updated = client.put(
+        f"/api/v1/inference-tasks/{created.json()['id']}",
+        headers=ADMIN_HEADERS,
+        json={**base, "name": "line-a-jsonl", "output": {"type": "jsonl"}},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["name"] == "line-a-jsonl"
+    assert updated.json()["output"] == {"type": "jsonl"}
+
+
+def test_inference_task_media_validation_and_desired_state(client: TestClient) -> None:
+    release, _ = _published_release(client)
+    node_id, access_token = _register_active_node(
+        client,
+        "deeplab_logits_v1",
+        features=["rkmpp_decode", "bytetrack", "kafka", "zlm_sei"],
+    )
+    base = {
+        "name": "line-a-media",
+        "releaseId": release["id"],
+        "nodeId": node_id,
+        "inputUri": "rtsp://camera/line-a",
+    }
+    mismatch = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={**base, "media": {"tracking": {"enabled": True}}},
+    )
+    assert mismatch.status_code == 409, mismatch.text
+    assert mismatch.json()["error"]["code"] == "tracking_adapter_mismatch"
+
+    media = {
+        "decoder": "rkmpp",
+        "kafka": {"enabled": True, "brokers": "kafka:9092", "topic": "sei_msg"},
+    }
+    created = client.post(
+        "/api/v1/inference-tasks", headers=ADMIN_HEADERS, json={**base, "media": media}
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["media"] == media
+
+    deployment = client.post(
+        "/api/v1/deployments",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "line-a-media-rollout",
+            "releaseId": release["id"],
+            "taskIds": [created.json()["id"]],
+            "strategy": "all_at_once",
+        },
+    )
+    assert deployment.status_code == 201, deployment.text
+    desired = client.get(
+        f"/api/v1/inference-agent/nodes/{node_id}/desired",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert desired.status_code == 200, desired.text
+    assert desired.json()["tasks"][0]["media"] == media
+
+
+def test_inference_analytics_round_trip_and_secondary_release_delivery(
+    client: TestClient,
+) -> None:
+    primary, _ = _published_yolo_release(client)
+    secondary, secondary_artifact_id = _published_yolo_release(client)
+    features = [
+        "bytetrack",
+        "analytics_area",
+        "analytics_line",
+        "event_snapshot",
+        "secondary_infer",
+    ]
+    node_id, access_token = _register_active_node(
+        client,
+        "yolo_dfl_split_v1",
+        suffix="analytics",
+        features=features,
+    )
+    analytics = {
+        "areas": [
+            {
+                "id": "loading-zone",
+                "name": "Loading zone",
+                "polygon": [
+                    {"x": 0.1, "y": 0.1},
+                    {"x": 0.8, "y": 0.1},
+                    {"x": 0.8, "y": 0.8},
+                ],
+                "classIds": [0],
+                "minCount": 1,
+                "holdFrames": 2,
+            }
+        ],
+        "lines": [
+            {
+                "id": "gate-a",
+                "name": "Gate A",
+                "start": {"x": 0.2, "y": 0.5},
+                "end": {"x": 0.8, "y": 0.5},
+                "direction": "both",
+                "classIds": [0],
+            }
+        ],
+        "osd": {"enabled": True, "showTrackId": True},
+        "events": {"enabled": True, "snapshot": True, "record": False},
+        "secondaryModels": [
+            {
+                "releaseId": secondary["id"],
+                "sourceClassIds": [0],
+                "confidenceThreshold": 0.35,
+            }
+        ],
+    }
+    base = {
+        "name": "analytics-task",
+        "releaseId": primary["id"],
+        "nodeId": node_id,
+        "inputUri": "rtsp://camera/analytics",
+        "media": {"tracking": {"enabled": True}},
+        "analytics": analytics,
+    }
+    created = client.post("/api/v1/inference-tasks", headers=ADMIN_HEADERS, json=base)
+    assert created.status_code == 201, created.text
+    normalized_analytics = {
+        **analytics,
+        "secondaryModels": [
+            {**analytics["secondaryModels"][0], "contextCount": 1, "workerCount": 1}
+        ],
+    }
+    assert created.json()["analytics"] == normalized_analytics
+
+    deployment = client.post(
+        "/api/v1/deployments",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "analytics-rollout",
+            "releaseId": primary["id"],
+            "taskIds": [created.json()["id"]],
+            "strategy": "all_at_once",
+        },
+    )
+    assert deployment.status_code == 201, deployment.text
+    agent_headers = {"Authorization": f"Bearer {access_token}"}
+    desired = client.get(
+        f"/api/v1/inference-agent/nodes/{node_id}/desired", headers=agent_headers
+    )
+    assert desired.status_code == 200, desired.text
+    assert {item["id"] for item in desired.json()["releases"]} == {
+        primary["id"],
+        secondary["id"],
+    }
+    assert desired.json()["tasks"][0]["analytics"] == normalized_analytics
+    secondary_download = client.get(
+        f"/api/v1/inference-agent/nodes/{node_id}/artifacts/"
+        f"{secondary_artifact_id}/download",
+        headers=agent_headers,
+    )
+    assert secondary_download.status_code == 200, secondary_download.text
+
+
+def test_inference_analytics_rejects_invalid_geometry_and_missing_runtime_requirements(
+    client: TestClient,
+) -> None:
+    release, _ = _published_yolo_release(client)
+    legacy_node_id, _ = _register_active_node(
+        client, "yolo_dfl_split_v1", suffix="analytics-legacy"
+    )
+    invalid_geometry = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "invalid-area",
+            "releaseId": release["id"],
+            "nodeId": legacy_node_id,
+            "inputUri": "rtsp://camera/invalid",
+            "analytics": {
+                "areas": [
+                    {
+                        "id": "area-a",
+                        "polygon": [
+                            {"x": -0.1, "y": 0.1},
+                            {"x": 0.8, "y": 0.1},
+                            {"x": 0.8, "y": 0.8},
+                        ],
+                    }
+                ]
+            },
+        },
+    )
+    assert invalid_geometry.status_code == 422, invalid_geometry.text
+
+    missing_tracking = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "missing-tracking",
+            "releaseId": release["id"],
+            "nodeId": legacy_node_id,
+            "inputUri": "rtsp://camera/no-tracking",
+            "analytics": {
+                "lines": [
+                    {
+                        "id": "line-a",
+                        "start": {"x": 0.1, "y": 0.5},
+                        "end": {"x": 0.9, "y": 0.5},
+                    }
+                ]
+            },
+        },
+    )
+    assert missing_tracking.status_code == 409, missing_tracking.text
+    assert missing_tracking.json()["error"]["code"] == "analytics_tracking_required"
+
+    missing_feature = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "missing-feature",
+            "releaseId": release["id"],
+            "nodeId": legacy_node_id,
+            "inputUri": "rtsp://camera/missing-feature",
+            "media": {"tracking": {"enabled": True}},
+            "analytics": {
+                "lines": [
+                    {
+                        "id": "line-a",
+                        "start": {"x": 0.1, "y": 0.5},
+                        "end": {"x": 0.9, "y": 0.5},
+                    }
+                ]
+            },
+        },
+    )
+    assert missing_feature.status_code == 409, missing_feature.text
+    assert missing_feature.json()["error"]["code"] == "inference_media_feature_missing"
+
+
+def test_inference_task_rejects_media_feature_missing_on_legacy_node(
+    client: TestClient,
+) -> None:
+    release, _ = _published_release(client)
+    node_id, _ = _register_active_node(
+        client, "deeplab_logits_v1", suffix="legacy-media"
+    )
+
+    response = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "legacy-node-rkmpp",
+            "releaseId": release["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/legacy",
+            "media": {"decoder": "rkmpp"},
+        },
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "inference_media_feature_missing"
+    assert response.json()["error"]["details"]["missingFeatures"] == ["rkmpp_decode"]
+
+
+def test_node_groups_support_update_and_guarded_delete(client: TestClient) -> None:
+    created = client.post(
+        "/api/v1/node-groups",
+        headers=ADMIN_HEADERS,
+        json={"name": "production-a", "description": "line a", "labels": ["plant-a"]},
+    )
+    assert created.status_code == 201, created.text
+    group = created.json()
+
+    updated = client.put(
+        f"/api/v1/node-groups/{group['id']}",
+        headers=ADMIN_HEADERS,
+        json={"name": "production-main", "description": "main line", "labels": ["main"]},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["name"] == "production-main"
+    assert updated.json()["labels"] == ["main"]
+
+    node = client.post(
+        "/api/v1/inference-nodes",
+        headers=ADMIN_HEADERS,
+        json={"name": "grouped-board", "groupId": group["id"]},
+    )
+    assert node.status_code == 201, node.text
+    blocked = client.delete(f"/api/v1/node-groups/{group['id']}", headers=ADMIN_HEADERS)
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["error"]["code"] == "node_group_not_empty"
+
+    empty = client.post(
+        "/api/v1/node-groups",
+        headers=ADMIN_HEADERS,
+        json={"name": "empty-group", "labels": []},
+    ).json()
+    deleted = client.delete(f"/api/v1/node-groups/{empty['id']}", headers=ADMIN_HEADERS)
+    assert deleted.status_code == 200, deleted.text
+
+
+def test_failed_deployment_can_be_retried_with_a_new_revision(client: TestClient) -> None:
+    release, _ = _published_release(client)
+    node_id, access_token = _register_active_node(client, "deeplab_logits_v1")
+    task = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "retry-task",
+            "releaseId": release["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/retry",
+        },
+    ).json()
+    deployment = client.post(
+        "/api/v1/deployments",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "retry-rollout",
+            "releaseId": release["id"],
+            "taskIds": [task["id"]],
+            "strategy": "all_at_once",
+        },
+    ).json()
+    target = deployment["targets"][0]
+    agent_headers = {"Authorization": f"Bearer {access_token}"}
+    failed = client.post(
+        f"/api/v1/inference-agent/nodes/{node_id}/targets/{target['id']}/status",
+        headers=agent_headers,
+        json={
+            "revision": 1,
+            "state": "failed",
+            "progress": 0,
+            "stage": "failed",
+            "errorCode": "download_failed",
+        },
+    )
+    assert failed.status_code == 200, failed.text
+
+    retried = client.post(
+        f"/api/v1/deployments/{deployment['id']}/retry", headers=ADMIN_HEADERS
+    )
+    assert retried.status_code == 200, retried.text
+    retried_target = retried.json()["targets"][0]
+    assert retried_target["desiredRevision"] == 2
+    assert retried_target["state"] == "pending"
+
+    stale = client.post(
+        f"/api/v1/inference-agent/nodes/{node_id}/targets/{target['id']}/status",
+        headers=agent_headers,
+        json={"revision": 1, "state": "healthy", "progress": 100, "stage": "healthy"},
+    )
+    assert stale.status_code == 409, stale.text
+    recovered = client.post(
+        f"/api/v1/inference-agent/nodes/{node_id}/targets/{target['id']}/status",
+        headers=agent_headers,
+        json={"revision": 2, "state": "healthy", "progress": 100, "stage": "healthy"},
+    )
+    assert recovered.status_code == 200, recovered.text
+    completed = client.get(
+        f"/api/v1/deployments/{deployment['id']}", headers=ADMIN_HEADERS
+    )
+    assert completed.json()["status"] == "succeeded"
+
+
+def test_canary_deployment_advances_one_node_at_a_time(client: TestClient) -> None:
+    release, _ = _published_release(client)
+    first_node, first_token = _register_active_node(
+        client, "deeplab_logits_v1", suffix="canary"
+    )
+    second_node, second_token = _register_active_node(
+        client, "deeplab_logits_v1", suffix="batch"
+    )
+    tasks: list[dict[str, Any]] = []
+    for name, node_id in (("canary-task", first_node), ("batch-task", second_node)):
+        response = client.post(
+            "/api/v1/inference-tasks",
+            headers=ADMIN_HEADERS,
+            json={
+                "name": name,
+                "releaseId": release["id"],
+                "nodeId": node_id,
+                "inputUri": f"rtsp://camera/{name}",
+            },
+        )
+        assert response.status_code == 201, response.text
+        tasks.append(response.json())
+    deployment = client.post(
+        "/api/v1/deployments",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "two-board-canary",
+            "releaseId": release["id"],
+            "taskIds": [item["id"] for item in tasks],
+            "strategy": "canary",
+            "batchSize": 1,
+        },
+    ).json()
+    assert [item["desiredRevision"] for item in deployment["targets"]] == [1, 0]
+
+    first_target = deployment["targets"][0]
+    first_report = client.post(
+        f"/api/v1/inference-agent/nodes/{first_node}/targets/{first_target['id']}/status",
+        headers={"Authorization": f"Bearer {first_token}"},
+        json={"revision": 1, "state": "healthy", "progress": 100, "stage": "healthy"},
+    )
+    assert first_report.status_code == 200, first_report.text
+    advanced = client.get(
+        f"/api/v1/deployments/{deployment['id']}", headers=ADMIN_HEADERS
+    ).json()
+    assert [item["desiredRevision"] for item in advanced["targets"]] == [1, 1]
+    assert [item["state"] for item in advanced["targets"]] == ["healthy", "pending"]
+
+    second_target = advanced["targets"][1]
+    second_report = client.post(
+        f"/api/v1/inference-agent/nodes/{second_node}/targets/{second_target['id']}/status",
+        headers={"Authorization": f"Bearer {second_token}"},
+        json={"revision": 1, "state": "healthy", "progress": 100, "stage": "healthy"},
+    )
+    assert second_report.status_code == 200, second_report.text
+    completed = client.get(
+        f"/api/v1/deployments/{deployment['id']}", headers=ADMIN_HEADERS
+    )
+    assert completed.json()["status"] == "succeeded"
+
+
+def test_retired_inference_node_record_can_be_permanently_deleted(
+    client: TestClient,
+) -> None:
+    created = client.post(
+        "/api/v1/inference-nodes",
+        headers=ADMIN_HEADERS,
+        json={"name": "retired-empty-board", "maxModelInstances": 1},
+    )
+    assert created.status_code == 201, created.text
+    node_id = created.json()["id"]
+
+    before_retirement = client.delete(
+        f"/api/v1/inference-nodes/{node_id}/record", headers=ADMIN_HEADERS
+    )
+    assert before_retirement.status_code == 409, before_retirement.text
+    assert before_retirement.json()["error"]["code"] == "inference_node_not_retired"
+
+    retired = client.delete(
+        f"/api/v1/inference-nodes/{node_id}", headers=ADMIN_HEADERS
+    )
+    assert retired.status_code == 200, retired.text
+    assert retired.json()["lifecycle"] == "retired"
+
+    deleted = client.delete(
+        f"/api/v1/inference-nodes/{node_id}/record", headers=ADMIN_HEADERS
+    )
+    assert deleted.status_code == 204, deleted.text
+    listed = client.get(
+        "/api/v1/inference-nodes?page=1&pageSize=100", headers=ADMIN_HEADERS
+    )
+    assert listed.status_code == 200, listed.text
+    assert all(item["id"] != node_id for item in listed.json()["items"])
+
+
+def test_retired_node_delete_cleans_retired_tasks_service_and_secrets(
+    client: TestClient,
+) -> None:
+    release, _ = _published_release(client)
+    node_id, _ = _register_active_node(
+        client, "deeplab_logits_v1", suffix="cascade-delete"
+    )
+    task = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "retired-cascade-task",
+            "releaseId": release["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/retired-cascade",
+        },
+    )
+    assert task.status_code == 201, task.text
+    task_id = task.json()["id"]
+    retired_task = client.delete(
+        f"/api/v1/inference-tasks/{task_id}", headers=ADMIN_HEADERS
+    )
+    assert retired_task.status_code == 200, retired_task.text
+
+    endpoint_id = new_id("service")
+    context = client.app.state.context
+    with context.database.session() as session:
+        session.add(
+            ServiceEndpointRecord(
+                id=endpoint_id,
+                name="retired-cascade-service",
+                kind="inference",
+                endpoint="http://127.0.0.1:11082",
+                mode="direct",
+                scheme="http",
+                host="127.0.0.1",
+                port=11082,
+                accelerator="rk3588",
+                capabilities_json=["deeplab_logits_v1"],
+                enabled=False,
+                token_configured=True,
+                inference_node_id=node_id,
+            )
+        )
+        session.add(NodeCleanupRecord(endpoint_id=endpoint_id, job_id="cleanup-job"))
+    context.node_secrets.write(endpoint_id, "node-secret")
+    context.node_secrets.write(endpoint_id, "agent-secret", purpose="agent")
+
+    retired_node = client.delete(
+        f"/api/v1/inference-nodes/{node_id}", headers=ADMIN_HEADERS
+    )
+    assert retired_node.status_code == 200, retired_node.text
+    deleted = client.delete(
+        f"/api/v1/inference-nodes/{node_id}/record", headers=ADMIN_HEADERS
+    )
+    assert deleted.status_code == 204, deleted.text
+
+    with context.database.session() as session:
+        assert session.get(InferenceNodeRecord, node_id) is None
+        assert session.get(InferenceTaskRecord, task_id) is None
+        assert session.get(ServiceEndpointRecord, endpoint_id) is None
+        assert session.scalar(
+            select(NodeCleanupRecord).where(
+                NodeCleanupRecord.endpoint_id == endpoint_id
+            )
+        ) is None
+    assert context.node_secrets.read(endpoint_id) is None
+    assert context.node_secrets.read(endpoint_id, purpose="agent") is None
+
+
+def test_retired_node_delete_rejects_non_retired_tasks(client: TestClient) -> None:
+    release, _ = _published_release(client)
+    node_id, _ = _register_active_node(
+        client, "deeplab_logits_v1", suffix="delete-task-guard"
+    )
+    task = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "still-configured-task",
+            "releaseId": release["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/still-configured",
+        },
+    )
+    assert task.status_code == 201, task.text
+    retired_node = client.delete(
+        f"/api/v1/inference-nodes/{node_id}", headers=ADMIN_HEADERS
+    )
+    assert retired_node.status_code == 200, retired_node.text
+
+    blocked = client.delete(
+        f"/api/v1/inference-nodes/{node_id}/record", headers=ADMIN_HEADERS
+    )
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["error"]["code"] == "inference_node_has_tasks"
+    assert blocked.json()["error"]["details"]["nonRetiredTaskCount"] == 1
+
+
+def test_retired_node_delete_preserves_deployment_history(client: TestClient) -> None:
+    release, _ = _published_release(client)
+    node_id, access_token = _register_active_node(
+        client, "deeplab_logits_v1", suffix="delete-history-guard"
+    )
+    task = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "deployment-history-task",
+            "releaseId": release["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/history-guard",
+        },
+    )
+    assert task.status_code == 201, task.text
+    task_id = task.json()["id"]
+    deployment = client.post(
+        "/api/v1/deployments",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "deployment-history-batch",
+            "releaseId": release["id"],
+            "taskIds": [task_id],
+            "strategy": "all_at_once",
+        },
+    )
+    assert deployment.status_code == 201, deployment.text
+    deployment_id = deployment.json()["id"]
+    target = deployment.json()["targets"][0]
+    healthy = client.post(
+        f"/api/v1/inference-agent/nodes/{node_id}/targets/{target['id']}/status",
+        headers={"Authorization": f"Bearer {access_token}"},
+        json={
+            "revision": target["desiredRevision"],
+            "state": "healthy",
+            "progress": 100,
+            "stage": "healthy",
+        },
+    )
+    assert healthy.status_code == 200, healthy.text
+    assert client.post(
+        f"/api/v1/inference-tasks/{task_id}/stop", headers=ADMIN_HEADERS
+    ).status_code == 200
+    assert client.delete(
+        f"/api/v1/inference-tasks/{task_id}", headers=ADMIN_HEADERS
+    ).status_code == 200
+    assert client.delete(
+        f"/api/v1/inference-nodes/{node_id}", headers=ADMIN_HEADERS
+    ).status_code == 200
+
+    blocked = client.delete(
+        f"/api/v1/inference-nodes/{node_id}/record", headers=ADMIN_HEADERS
+    )
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["error"]["code"] == "inference_node_has_history"
+    assert blocked.json()["error"]["details"]["deploymentTargetCount"] == 1
+    assert blocked.json()["error"]["details"]["deploymentEventCount"] > 0
+
+    removed_deployment = client.delete(
+        f"/api/v1/deployments/{deployment_id}", headers=ADMIN_HEADERS
+    )
+    assert removed_deployment.status_code == 204, removed_deployment.text
+    deleted_node = client.delete(
+        f"/api/v1/inference-nodes/{node_id}/record", headers=ADMIN_HEADERS
+    )
+    assert deleted_node.status_code == 204, deleted_node.text
+
+
+def test_completed_deployment_can_be_deleted_with_targets_and_events(
+    client: TestClient,
+) -> None:
+    release, _ = _published_release(client)
+    node_id, access_token = _register_active_node(
+        client, "deeplab_logits_v1", suffix="delete-deployment"
+    )
+    task = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "deployment-delete-task",
+            "releaseId": release["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/deployment-delete",
+        },
+    )
+    assert task.status_code == 201, task.text
+    deployment = client.post(
+        "/api/v1/deployments",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "completed-delete-rollout",
+            "releaseId": release["id"],
+            "taskIds": [task.json()["id"]],
+            "strategy": "all_at_once",
+        },
+    )
+    assert deployment.status_code == 201, deployment.text
+    deployment_id = deployment.json()["id"]
+    target = deployment.json()["targets"][0]
+
+    active_delete = client.delete(
+        f"/api/v1/deployments/{deployment_id}", headers=ADMIN_HEADERS
+    )
+    assert active_delete.status_code == 409, active_delete.text
+    assert active_delete.json()["error"]["code"] == "deployment_active"
+
+    healthy = client.post(
+        f"/api/v1/inference-agent/nodes/{node_id}/targets/{target['id']}/status",
+        headers={"Authorization": f"Bearer {access_token}"},
+        json={
+            "revision": target["desiredRevision"],
+            "state": "healthy",
+            "progress": 100,
+            "stage": "healthy",
+        },
+    )
+    assert healthy.status_code == 200, healthy.text
+    events = client.get(
+        f"/api/v1/deployments/{deployment_id}/events", headers=ADMIN_HEADERS
+    )
+    assert events.status_code == 200, events.text
+    assert events.json()
+
+    deleted = client.delete(
+        f"/api/v1/deployments/{deployment_id}", headers=ADMIN_HEADERS
+    )
+    assert deleted.status_code == 204, deleted.text
+    missing = client.get(
+        f"/api/v1/deployments/{deployment_id}", headers=ADMIN_HEADERS
+    )
+    assert missing.status_code == 404, missing.text
+    missing_events = client.get(
+        f"/api/v1/deployments/{deployment_id}/events", headers=ADMIN_HEADERS
+    )
+    assert missing_events.status_code == 404, missing_events.text

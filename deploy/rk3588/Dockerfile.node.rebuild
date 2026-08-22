@@ -1,0 +1,56 @@
+ARG RKNODE_BASE_IMAGE=rknode-rk3588-node:2026.08.20-business
+FROM ${RKNODE_BASE_IMAGE} AS rknode-root
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/opt/rknode
+
+RUN rm -rf /opt/rknode/src/nv_video_pipeline /opt/rknode/backend \
+       /opt/rknode/workers /opt/rknode/config /opt/rknode/runtime-adapter \
+       /tmp/rknode-build
+
+COPY third_party/nv_video_pipeline /opt/rknode/src/nv_video_pipeline
+ARG RKNODE_BUILD_JOBS=2
+RUN cmake -S /opt/rknode/src/nv_video_pipeline -B /tmp/rknode-build \
+        -DRKNN_SDK_ROOT=/opt/rknode/src/nv_video_pipeline/3rdparty/rknpu2 \
+        -DROCKCHIP_MPP_ROOT=/opt/rknode/src/nv_video_pipeline/3rdparty/rockchip-mpp \
+        -DRKNODE_WITH_RKMPP=ON \
+        -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build /tmp/rknode-build --parallel ${RKNODE_BUILD_JOBS} \
+    && install -m 0755 \
+       /tmp/rknode-build/bin/rknn_pipeline \
+       /tmp/rknode-build/bin/rknn_smoke \
+       /tmp/rknode-build/bin/rknn_instance_probe \
+       /tmp/rknode-build/bin/rknn_protocol_probe /usr/local/bin/ \
+    && install -m 0755 /tmp/rknode-build/bin/libVideoPipeline_RKNN.so /usr/local/lib/ \
+    && rm -rf /tmp/rknode-build
+
+COPY backend /opt/rknode/backend
+COPY workers /opt/rknode/workers
+COPY config /opt/rknode/config
+COPY deploy/rk3588/runtime-adapter /opt/rknode/runtime-adapter
+RUN chmod 0755 /opt/rknode/runtime-adapter/*.sh \
+    && find /opt/rknode -type d -name __pycache__ -prune -exec rm -rf '{}' +
+
+FROM scratch
+COPY --from=rknode-root / /
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/opt/rknode
+WORKDIR /opt/rknode
+
+ARG RKNODE_RELEASE_VERSION=dev
+ARG RKNODE_SOURCE_REVISION=unknown
+LABEL org.opencontainers.image.title="RKNode RK3588 Node" \
+      org.opencontainers.image.version="${RKNODE_RELEASE_VERSION}" \
+      org.opencontainers.image.revision="${RKNODE_SOURCE_REVISION}" \
+      io.rknode.component="rk3588-node" \
+      io.rknode.roles="converter,inference" \
+      io.rknode.accelerator="rk3588" \
+      io.rknode.runtime="cpp-rknn" \
+      io.rknode.inference-business="analytics,bytetrack,secondary-yolo,event-media,kafka,zlm-sei" \
+      io.rknode.inference-concurrency="context-pool,worker-pool" \
+      io.rknode.face-capabilities="none" \
+      io.rknode.build-environment="included" \
+      io.rknode.offline-ready="true"
+
+EXPOSE 10081
+ENTRYPOINT []
+CMD ["python3", "-m", "workers.node_service.main"]

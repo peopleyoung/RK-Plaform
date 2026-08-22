@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "profiles": [
+    {
+      "id": "yolo-detect",
+      "family": "YOLO",
+      "label": "YOLO 目标检测",
+      "taskType": "object_detection",
+      "framework": "airockchip-ultralytics",
+      "variants": ["yolov5s", "yolov6s", "yolov7-tiny", "yolov8n", "yolov8s", "yolov10n", "yolo11n"],
+      "sourceFormats": ["onnx"],
+      "precisions": ["int8", "fp16"],
+      "defaultResolution": {"width": 640, "height": 640},
+      "resolutionRule": {"minWidth": 160, "maxWidth": 2048, "minHeight": 160, "maxHeight": 2048, "widthMultiple": 32, "heightMultiple": 32},
+      "input": {"name": "images", "layout": "NCHW", "channels": 3, "dtype": "float32", "colorSpace": "RGB", "resizePolicy": "letterbox"},
+      "preprocessing": {"mean": [0.0, 0.0, 0.0], "std": [255.0, 255.0, 255.0]},
+      "outputContract": "rknn_yolo_split_heads_v1",
+      "export": {"opset": 12, "batch": 1, "dynamic": false},
+      "rknn": {"targetPlatform": "rk3588", "quantizedAlgorithm": "normal", "optimizationLevel": 3, "requiresCalibrationFor": ["int8"]},
+      "variantContracts": {
+        "yolov5s": {"exporter": "airockchip-yolov5-rknpu", "opset": 12, "outputContract": "rknn_yolov5_anchored_heads_v1"},
+        "yolov6s": {"exporter": "airockchip-yolov6-rknn", "opset": 12, "outputContract": "rknn_yolov6_split_heads_v1"},
+        "yolov7-tiny": {"exporter": "airockchip-yolov7-rknpu", "opset": 12, "outputContract": "rknn_yolov7_anchored_heads_v1"},
+        "yolov8n": {"exporter": "airockchip-ultralytics-yolov8", "opset": 12, "outputContract": "rknn_yolo_dfl_split_heads_v1"},
+        "yolov8s": {"exporter": "airockchip-ultralytics-yolov8", "opset": 12, "outputContract": "rknn_yolo_dfl_split_heads_v1"},
+        "yolov10n": {"exporter": "airockchip-yolov10-rknn", "opset": 13, "outputContract": "rknn_yolov10_split_heads_v1"},
+        "yolo11n": {"exporter": "airockchip-ultralytics-yolo11", "opset": 12, "outputContract": "rknn_yolo_dfl_split_heads_v1"}
+      }
+    },
+    {
+      "id": "deeplabv3plus",
+      "family": "DeepLabV3+",
+      "label": "DeepLabV3+ 语义分割",
+      "taskType": "semantic_segmentation",
+      "framework": "segmentation-models-pytorch",
+      "variants": ["mobilenet_v2_rknn", "mobilenet_v2", "resnet50"],
+      "sourceFormats": ["onnx"],
+      "precisions": ["int8", "fp16"],
+      "defaultResolution": {"width": 512, "height": 512},
+      "resolutionRule": {"minWidth": 128, "maxWidth": 2048, "minHeight": 128, "maxHeight": 2048, "widthMultiple": 32, "heightMultiple": 32},
+      "input": {"name": "images", "layout": "NCHW", "channels": 3, "dtype": "float32", "colorSpace": "RGB", "resizePolicy": "stretch"},
+      "preprocessing": {"mean": [127.5, 127.5, 127.5], "std": [127.5, 127.5, 127.5]},
+      "outputContract": "semantic_logits_nchw_v1",
+      "export": {"opset": 12, "batch": 1, "dynamic": false},
+      "rknn": {"targetPlatform": "rk3588", "quantizedAlgorithm": "normal", "optimizationLevel": 3, "requiresCalibrationFor": ["int8"]}
+    },
+    {
+      "id": "ppocr-det",
+      "family": "PPOCR",
+      "label": "PPOCR 文本检测",
+      "taskType": "ocr_detection",
+      "framework": "paddleocr",
+      "variants": ["ppocrv3_det", "ppocrv4_det"],
+      "sourceFormats": ["onnx"],
+      "precisions": ["int8", "fp16"],
+      "defaultResolution": {"width": 480, "height": 480},
+      "resolutionRule": {"minWidth": 128, "maxWidth": 2048, "minHeight": 128, "maxHeight": 2048, "widthMultiple": 32, "heightMultiple": 32},
+      "input": {"name": "x", "layout": "NCHW", "channels": 3, "dtype": "float32", "colorSpace": "RGB", "resizePolicy": "stretch"},
+      "preprocessing": {"mean": [123.675, 116.28, 103.53], "std": [58.395, 57.12, 57.375]},
+      "outputContract": "ppocr_db_probability_map_v1",
+      "export": {"opset": 14, "batch": 1, "dynamic": false},
+      "rknn": {"targetPlatform": "rk3588", "quantizedAlgorithm": "normal", "optimizationLevel": 3, "requiresCalibrationFor": ["int8"]}
+    },
+    {
+      "id": "ppocr-rec",
+      "family": "PPOCR",
+      "label": "PPOCR 文本识别",
+      "taskType": "ocr_recognition",
+      "framework": "paddleocr",
+      "variants": ["ppocrv3_rec", "ppocrv4_rec"],
+      "sourceFormats": ["onnx"],
+      "precisions": ["fp16"],
+      "defaultResolution": {"width": 320, "height": 48},
+      "resolutionRule": {"minWidth": 32, "maxWidth": 2048, "minHeight": 32, "maxHeight": 128, "widthMultiple": 8, "heightMultiple": 8},
+      "input": {"name": "x", "layout": "NCHW", "channels": 3, "dtype": "float32", "colorSpace": "RGB", "resizePolicy": "keep_aspect_pad"},
+      "preprocessing": {"mean": [127.5, 127.5, 127.5], "std": [127.5, 127.5, 127.5]},
+      "outputContract": "ppocr_ctc_logits_v1",
+      "export": {"opset": 14, "batch": 1, "dynamic": false},
+      "rknn": {"targetPlatform": "rk3588", "quantizedAlgorithm": "normal", "optimizationLevel": 3, "requiresCalibrationFor": []}
+    }
+  ]
+}

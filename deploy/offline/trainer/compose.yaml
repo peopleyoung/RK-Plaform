@@ -1,0 +1,38 @@
+x-rknode-logging: &rknode-logging
+  driver: json-file
+  options:
+    max-size: "${RKNODE_CONTAINER_LOG_MAX_SIZE:-20m}"
+    max-file: "${RKNODE_CONTAINER_LOG_MAX_FILES:-3}"
+
+services:
+  trainer:
+    image: ${RKNODE_TRAINER_IMAGE:?set RKNODE_TRAINER_IMAGE}
+    pull_policy: never
+    entrypoint: []
+    command: ["python", "-m", "workers.node_service.main"]
+    restart: unless-stopped
+    ports:
+      - "${RKNODE_NODE_HOST_PORT:-10081}:10081"
+    environment:
+      RKNODE_NODE_TOKEN: ${RKNODE_NODE_TOKEN:-}
+      RKNODE_NODE_TOKEN_FILE: ${RKNODE_NODE_TOKEN_FILE:-/data/state/node-token}
+      RKNODE_NODE_NAME: ${RKNODE_NODE_NAME:-trainer-01}
+      RKNODE_NODE_KIND: trainer
+      RKNODE_NODE_ACCELERATOR: ${RKNODE_NODE_ACCELERATOR:?set cpu or cuda}
+      RKNODE_NODE_CAPABILITIES: ${RKNODE_NODE_CAPABILITIES:?set trainer capabilities}
+      RKNODE_NODE_MAX_CONCURRENCY: ${RKNODE_NODE_MAX_CONCURRENCY:-1}
+      RKNODE_NODE_PORT: 10081
+      RKNODE_NODE_WORK_DIR: /data/jobs
+      RKNODE_API_URL: ${RKNODE_PLATFORM_URL:?set central platform URL}/api/v1
+      RKNODE_WORKER_NAME: ${RKNODE_NODE_NAME:-trainer-01}
+      RKNODE_WORKER_KIND: trainer
+      RKNODE_WORKER_ACCELERATOR: ${RKNODE_NODE_ACCELERATOR:?set cpu or cuda}
+      RKNODE_WORKER_CAPABILITIES: ${RKNODE_NODE_CAPABILITIES:?set trainer capabilities}
+      RKNODE_WORKER_MAX_CONCURRENCY: ${RKNODE_NODE_MAX_CONCURRENCY:-1}
+      RKNODE_WORK_DIR: /data/jobs
+    volumes:
+      - trainer-data:/data
+    logging: *rknode-logging
+
+volumes:
+  trainer-data:

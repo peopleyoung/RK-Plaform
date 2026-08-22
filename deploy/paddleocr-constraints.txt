@@ -1,0 +1,11 @@
+# PaddlePaddle 3.2.2 / PaddleOCR release-2.7 binary compatibility set.
+# Keep this file pinned: unconstrained future wheels have caused native crashes.
+Cython==0.29.36
+numpy==1.24.4
+pandas==2.0.3
+Pillow==10.2.0
+protobuf==3.20.2
+scikit-image==0.21.0
+scipy==1.10.1
+setuptools==69.5.1
+shapely==2.0.3

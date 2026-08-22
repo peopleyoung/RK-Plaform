@@ -1,0 +1,93 @@
+x-rknode-logging: &rknode-logging
+  driver: json-file
+  options:
+    max-size: "${RKNODE_CONTAINER_LOG_MAX_SIZE:-20m}"
+    max-file: "${RKNODE_CONTAINER_LOG_MAX_FILES:-3}"
+
+x-rknode-build: &rknode-build
+  context: ../../..
+  dockerfile: deploy/rk3588/Dockerfile.node
+  target: rknode-runtime
+  args:
+    RKNN_TOOLKIT_IMAGE: ${RKNODE_CONVERTER_BASE_IMAGE:-rknn_toolkit2:2.3.2-debian12-cp311-aarch64}
+    DEBIAN_MIRROR: ${RKNODE_DEBIAN_MIRROR:-http://deb.debian.org}
+    PYTHON_INDEX_URL: ${RKNODE_PYTHON_INDEX_URL:-https://pypi.org/simple}
+
+services:
+  converter:
+    build: *rknode-build
+    image: ${RKNODE_CONVERTER_IMAGE:-${RKNODE_RK3588_IMAGE:-rknode-rk3588-node:2026.08.20-business}}
+    restart: unless-stopped
+    ports:
+      - "${RKNODE_CONVERTER_HOST_PORT:-10081}:10081"
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/dma_heap:/dev/dma_heap
+    environment:
+      RKNODE_NODE_TOKEN: ${RKNODE_CONVERTER_TOKEN:-}
+      RKNODE_NODE_TOKEN_FILE: ${RKNODE_CONVERTER_NODE_TOKEN_FILE:-/data/state/node-token}
+      RKNODE_NODE_NAME: ${RKNODE_CONVERTER_NAME:-rk3588-converter-01}
+      RKNODE_NODE_KIND: converter
+      RKNODE_NODE_ACCELERATOR: rk3588
+      RKNODE_NODE_CAPABILITIES: ${RKNODE_CONVERTER_CAPABILITIES:-yolo-detect,deeplabv3plus,ppocr-det,ppocr-rec}
+      RKNODE_NODE_PORT: 10081
+      RKNODE_NODE_WORK_DIR: /data/jobs
+      RKNODE_REQUIRE_NPU_DEVICE: ${RKNODE_REQUIRE_NPU_DEVICE:-true}
+      RKNODE_API_URL: ${RKNODE_PLATFORM_URL:?set central platform URL}/api/v1
+      RKNODE_WORKER_NAME: ${RKNODE_CONVERTER_NAME:-rk3588-converter-01}
+      RKNODE_WORKER_KIND: converter
+      RKNODE_WORKER_ACCELERATOR: rk3588
+      RKNODE_WORKER_CAPABILITIES: ${RKNODE_CONVERTER_CAPABILITIES:-yolo-detect,deeplabv3plus,ppocr-det,ppocr-rec}
+      RKNODE_WORK_DIR: /data/jobs
+    volumes:
+      - converter-data:/data
+    logging: *rknode-logging
+
+  inference:
+    build: *rknode-build
+    image: ${RKNODE_INFERENCE_IMAGE:-${RKNODE_RK3588_IMAGE:-rknode-rk3588-node:2026.08.20-business}}
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${RKNODE_INFERENCE_HOST_PORT:-10082}:10081"
+    security_opt:
+      - systempaths=unconfined
+    devices:
+      - /dev/dri/card0:/dev/dri/card0
+      - /dev/dri/renderD128:/dev/dri/renderD128
+      - /dev/mpp_service:/dev/mpp_service
+      - /dev/rga:/dev/rga
+      - /dev/dma_heap:/dev/dma_heap
+    environment:
+      RKNODE_NODE_TOKEN: ${RKNODE_INFERENCE_TOKEN:-}
+      RKNODE_NODE_TOKEN_FILE: ${RKNODE_INFERENCE_NODE_TOKEN_FILE:-/data/state/node-token}
+      RKNODE_NODE_NAME: ${RKNODE_INFERENCE_NAME:-rk3588-inference-01}
+      RKNODE_NODE_KIND: inference
+      RKNODE_NODE_ACCELERATOR: rk3588
+      RKNODE_NODE_CAPABILITIES: ${RKNODE_INFERENCE_ADAPTERS:-yolo_dfl_split_v1,deeplab_logits_v1,ppocr_db_det_v1,ppocr_ctc_rec_v1}
+      RKNODE_NODE_FEATURES: ${RKNODE_MEDIA_FEATURES:-rkmpp_decode,bytetrack,kafka,zlm_sei,analytics_area,analytics_line,event_snapshot,event_record,secondary_infer}
+      RKNODE_NODE_MAX_CONCURRENCY: ${RKNODE_MAX_MODEL_INSTANCES:-4}
+      RKNODE_NODE_PORT: 10081
+      RKNODE_HARDWARE_ID: ${RKNODE_HARDWARE_ID:-rk3588-board}
+      RKNODE_RUNTIME_VERSION: ${RKNODE_RUNTIME_VERSION:-rknn-runtime-2.3.2}
+      RKNODE_DRIVER_VERSION: ${RKNODE_DRIVER_VERSION:-unknown}
+      RKNODE_PIPELINE_VERSION: ${RKNODE_PIPELINE_VERSION:-rknode-cpp-runtime-2026.08.20-business}
+      RKNODE_ADAPTERS: ${RKNODE_INFERENCE_ADAPTERS:-yolo_dfl_split_v1,deeplab_logits_v1,ppocr_db_det_v1,ppocr_ctc_rec_v1}
+      RKNODE_MODEL_DIR: /data/models
+      RKNODE_STATE_DIR: /data/state
+      RKNODE_RUNTIME_STATE_DIR: /data/runtime
+      RKNODE_INFERENCE_OUTPUT_DIR: /data/output
+      RKNODE_REQUIRE_NPU_DEVICE: ${RKNODE_REQUIRE_NPU_DEVICE:-true}
+      RKNODE_RUNTIME_COMMAND: ${RKNODE_RUNTIME_COMMAND:-/opt/rknode/runtime-adapter/activate-task.sh}
+      RKNODE_RUNTIME_HEALTH_COMMAND: ${RKNODE_RUNTIME_HEALTH_COMMAND:-/opt/rknode/runtime-adapter/health.sh}
+      RKNODE_MODEL_PROBE_COMMAND: ${RKNODE_MODEL_PROBE_COMMAND:-/opt/rknode/runtime-adapter/probe-model.sh}
+      RKNODE_SELF_TEST_COMMAND: ${RKNODE_SELF_TEST_COMMAND:-/opt/rknode/runtime-adapter/self-test.sh}
+    volumes:
+      - inference-data:/data
+      - ${RKNODE_INFERENCE_OUTPUT_DIR:-./output}:/data/output
+      - /sys/firmware/devicetree/base:/sys/firmware/devicetree/base:ro
+    logging: *rknode-logging
+
+volumes:
+  converter-data:
+  inference-data:

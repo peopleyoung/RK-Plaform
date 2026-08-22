@@ -1,0 +1,28 @@
+services:
+  converter:
+    environment:
+      RKNODE_NODE_TOKEN: ""
+      RKNODE_ENDPOINT_ID: ${RKNODE_CONVERTER_ENDPOINT_ID:?set converter endpoint ID from the platform}
+      RKNODE_PLATFORM_URL: ${RKNODE_PLATFORM_URL:?set central platform URL}
+      RKNODE_ENROLLMENT_TOKEN_FILE: /run/secrets/rknode-enrollment-token
+      RKNODE_NODE_TOKEN_FILE: /data/state/node-token
+    secrets:
+      - source: rknode-converter-enrollment-token
+        target: rknode-enrollment-token
+
+  inference:
+    environment:
+      RKNODE_NODE_TOKEN: ""
+      RKNODE_ENDPOINT_ID: ${RKNODE_INFERENCE_ENDPOINT_ID:?set inference endpoint ID from the platform}
+      RKNODE_PLATFORM_URL: ${RKNODE_PLATFORM_URL:?set central platform URL}
+      RKNODE_ENROLLMENT_TOKEN_FILE: /run/secrets/rknode-enrollment-token
+      RKNODE_NODE_TOKEN_FILE: /data/state/node-token
+    secrets:
+      - source: rknode-inference-enrollment-token
+        target: rknode-enrollment-token
+
+secrets:
+  rknode-converter-enrollment-token:
+    file: ${RKNODE_CONVERTER_ENROLLMENT_TOKEN_PATH:?set converter enrollment token file path}
+  rknode-inference-enrollment-token:
+    file: ${RKNODE_INFERENCE_ENROLLMENT_TOKEN_PATH:?set inference enrollment token file path}

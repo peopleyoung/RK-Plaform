@@ -1,0 +1,8 @@
+instances: instances.yaml
+pipelines: pipelines
+
+log_config:
+  log_level: 2
+
+pipe_perf_interval: 5
+instance_perf_interval: 5

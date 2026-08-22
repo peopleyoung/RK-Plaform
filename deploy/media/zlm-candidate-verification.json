@@ -1,0 +1,29 @@
+{
+  "checks": {
+    "directWsFlv": true,
+    "h264VideoNonblank": true,
+    "playAuthorized": true,
+    "publishAuthorized": true,
+    "seiArrived": true
+  },
+  "details": {
+    "latencySamplesMs": [
+      0
+    ],
+    "maxQueueAgeMs": 0.0,
+    "maxQueueDepth": 1,
+    "overlayCoordinates": true,
+    "overlaySkewFrames": [
+      0
+    ],
+    "reconnectDurationMs": 0.0,
+    "segmentationRendered": true,
+    "seiCount": 1,
+    "videoFrameCount": 1
+  },
+  "fixtureHash": "6a54bf42d8fd183f5f76b858e0fee84f3068275a7f2ebf19023d09e191e95d45",
+  "image": "zlmediakit/zlmediakit@sha256:a9cb0166409bdd8f473162eb2fcb12d15206f98daeeeec36606072e5a352af15",
+  "passed": true,
+  "schemaVersion": 1,
+  "verifiedAt": "2026-08-21T09:31:59.394505Z"
+}

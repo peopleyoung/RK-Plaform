@@ -1,0 +1,29 @@
+{
+  "name": "rknode-console-prototype",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json && vite build",
+    "preview": "vite preview",
+    "test:unit": "vitest run src",
+    "test:ui": "node scripts/smoke.mjs",
+    "test:media-e2e": ".venv/bin/python scripts/run_media_e2e.py"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "lucide-react": "latest",
+    "mpegts.js": "1.8.2",
+    "react": "latest",
+    "react-dom": "latest",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "playwright": "^1.62.1",
+    "typescript": "latest",
+    "vitest": "4.1.11"
+  }
+}

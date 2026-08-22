@@ -1,0 +1,38 @@
+x-rknode-logging: &rknode-logging
+  driver: json-file
+  options:
+    max-size: "${RKNODE_CONTAINER_LOG_MAX_SIZE:-20m}"
+    max-file: "${RKNODE_CONTAINER_LOG_MAX_FILES:-3}"
+
+services:
+  converter:
+    image: ${RKNODE_CONVERTER_IMAGE:-${RKNODE_RK3588_IMAGE:-rknode-rk3588-node:2026.08.20-business}}
+    pull_policy: never
+    restart: unless-stopped
+    ports:
+      - "${RKNODE_CONVERTER_HOST_PORT:-10081}:10081"
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/dma_heap:/dev/dma_heap
+    environment:
+      RKNODE_NODE_TOKEN: ${RKNODE_CONVERTER_TOKEN:-}
+      RKNODE_NODE_TOKEN_FILE: ${RKNODE_CONVERTER_NODE_TOKEN_FILE:-/data/state/node-token}
+      RKNODE_NODE_NAME: ${RKNODE_CONVERTER_NAME:-rk3588-converter-01}
+      RKNODE_NODE_KIND: converter
+      RKNODE_NODE_ACCELERATOR: rk3588
+      RKNODE_NODE_CAPABILITIES: ${RKNODE_CONVERTER_CAPABILITIES:-yolo-detect,deeplabv3plus,ppocr-det,ppocr-rec}
+      RKNODE_NODE_PORT: 10081
+      RKNODE_NODE_WORK_DIR: /data/jobs
+      RKNODE_REQUIRE_NPU_DEVICE: ${RKNODE_REQUIRE_NPU_DEVICE:-true}
+      RKNODE_API_URL: ${RKNODE_PLATFORM_URL:?set central platform URL}/api/v1
+      RKNODE_WORKER_NAME: ${RKNODE_CONVERTER_NAME:-rk3588-converter-01}
+      RKNODE_WORKER_KIND: converter
+      RKNODE_WORKER_ACCELERATOR: rk3588
+      RKNODE_WORKER_CAPABILITIES: ${RKNODE_CONVERTER_CAPABILITIES:-yolo-detect,deeplabv3plus,ppocr-det,ppocr-rec}
+      RKNODE_WORK_DIR: /data/jobs
+    volumes:
+      - converter-data:/data
+    logging: *rknode-logging
+
+volumes:
+  converter-data:

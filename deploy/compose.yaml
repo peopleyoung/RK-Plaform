@@ -1,0 +1,82 @@
+x-rknode-logging: &rknode-logging
+  driver: json-file
+  options:
+    max-size: "${RKNODE_CONTAINER_LOG_MAX_SIZE:-20m}"
+    max-file: "${RKNODE_CONTAINER_LOG_MAX_FILES:-3}"
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    image: ${RKNODE_API_IMAGE:-rknode-platform-api:2026.08.20}
+    restart: unless-stopped
+    environment:
+      RKNODE_ENVIRONMENT: production
+      RKNODE_DATA_DIR: /data
+      RKNODE_ADMIN_TOKEN: ${RKNODE_ADMIN_TOKEN:?set RKNODE_ADMIN_TOKEN}
+      RKNODE_WORKER_TOKEN: ${RKNODE_WORKER_TOKEN:?set RKNODE_WORKER_TOKEN}
+      RKNODE_PUBLIC_API_URL: ${RKNODE_PUBLIC_API_URL:?set public API URL reachable by nodes}
+      RKNODE_CORS_ORIGINS: ${RKNODE_CORS_ORIGINS:-http://localhost:5173}
+      RKNODE_MEDIA_BUILTIN_ENABLED: ${RKNODE_MEDIA_BUILTIN_ENABLED:-true}
+      RKNODE_MEDIA_PUBLISH_HOST: ${RKNODE_MEDIA_PUBLISH_HOST:?set node-reachable media publish host}
+      RKNODE_MEDIA_PLAYBACK_HOST: ${RKNODE_MEDIA_PLAYBACK_HOST:?set browser-reachable media playback host}
+      RKNODE_MEDIA_RTSP_PORT: ${RKNODE_MEDIA_RTSP_PORT:-8554}
+      RKNODE_MEDIA_WS_PORT: ${RKNODE_MEDIA_WS_PORT:-8081}
+      RKNODE_MEDIA_API_HOST: media
+      RKNODE_MEDIA_API_PORT: 80
+      RKNODE_ZLM_API_SECRET: ${RKNODE_ZLM_API_SECRET:?generate media secrets}
+      RKNODE_ZLM_HOOK_IDENTITY: ${RKNODE_ZLM_HOOK_IDENTITY:?generate media secrets}
+    volumes:
+      - platform-data:/data
+    logging: *rknode-logging
+    healthcheck:
+      test: ["CMD", ".venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/ready')"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.frontend
+    image: ${RKNODE_WEB_IMAGE:-rknode-platform-web:2026.08.20}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${RKNODE_WEB_PORT:-5173}:80"
+    logging: *rknode-logging
+
+  media:
+    build:
+      context: ..
+      dockerfile: deploy/media/Dockerfile
+      args:
+        ZLM_BASE_IMAGE: ${RKNODE_ZLM_BASE_IMAGE:?set immutable ZLMediaKit base image}
+    image: ${RKNODE_MEDIA_IMAGE:-rknode-platform-media:2026.08.20}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      RKNODE_ZLM_API_SECRET: ${RKNODE_ZLM_API_SECRET:?generate media secrets}
+      RKNODE_ZLM_HOOK_IDENTITY: ${RKNODE_ZLM_HOOK_IDENTITY:?generate media secrets}
+    ports:
+      - "${RKNODE_MEDIA_RTSP_PORT:-8554}:554"
+      - "${RKNODE_MEDIA_WS_PORT:-8081}:80"
+    volumes:
+      - media-data:/opt/media/www
+      - media-logs:/opt/media/bin/log
+    logging: *rknode-logging
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import os,urllib.request; urllib.request.urlopen(\"http://127.0.0.1/index/api/getServerConfig?secret=\" + os.environ[\"RKNODE_ZLM_API_SECRET\"], timeout=3)' "]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  platform-data:
+  media-data:
+  media-logs:

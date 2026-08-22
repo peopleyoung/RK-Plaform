@@ -1,0 +1,128 @@
+ARG BASE_IMAGE=python:3.11-slim-bookworm
+FROM ${BASE_IMAGE} AS trainer-root
+
+ENV DEBIAN_FRONTEND=noninteractive PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    UV_HTTP_TIMEOUT=300 UV_NO_CACHE=1 UV_LINK_MODE=copy
+ARG DEBIAN_MIRROR=http://deb.debian.org
+RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+      -exec sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR}|g" {} + && \
+    apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update && \
+    apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends libglib2.0-0 libgomp1 && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /opt/rknode
+
+ARG PYTHON_INDEX_URL=https://pypi.org/simple
+RUN python3 -m pip install --no-cache-dir --index-url "${PYTHON_INDEX_URL}" uv==0.8.4
+ARG TORCH_VERSION=2.5.1+cpu
+ARG TORCHVISION_VERSION=0.20.1+cpu
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+ARG EXPECTED_CUDA_VERSION=none
+RUN uv venv --python python3 --system-site-packages /opt/venv && \
+    if ! /opt/venv/bin/python -c "import torch, torchvision" 2>/dev/null; then \
+      uv pip install --no-cache --python /opt/venv/bin/python \
+        --default-index "${PYTHON_INDEX_URL}" \
+        filelock typing-extensions networkx jinja2 fsspec "sympy==1.13.1" numpy pillow; \
+      uv pip install --no-cache --python /opt/venv/bin/python --no-deps \
+        --default-index "${TORCH_INDEX_URL}" \
+        "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}"; \
+    fi
+
+ARG SEGMENTATION_MODELS_PYTORCH_COMMIT=420ce84b0c2df0286fa9bb2bd1499eea625c9b33
+COPY third_party/training/SOURCES.lock /opt/frameworks/SOURCES.lock
+COPY third_party/training/segmentation_models_pytorch /opt/frameworks/segmentation_models_pytorch
+RUN test -f /opt/frameworks/segmentation_models_pytorch/pyproject.toml \
+    && test -f /opt/frameworks/segmentation_models_pytorch/LICENSE \
+    && test -f /opt/frameworks/segmentation_models_pytorch/segmentation_models_pytorch/decoders/deeplabv3/model.py \
+    && grep -Fx "segmentation_models_pytorch ${SEGMENTATION_MODELS_PYTORCH_COMMIT}" /opt/frameworks/SOURCES.lock
+RUN uv pip install --no-cache --python /opt/venv/bin/python \
+      --default-index "${PYTHON_INDEX_URL}" \
+      fastapi uvicorn pydantic onnx==1.16.2 numpy==1.26.4 \
+      pillow "setuptools>=61" "huggingface-hub>=0.24" "safetensors>=0.3.1" \
+      "tqdm>=4.42.1" && \
+    uv pip install --no-cache --python /opt/venv/bin/python --no-deps \
+      --default-index "${PYTHON_INDEX_URL}" "timm>=0.9" && \
+    uv pip install --no-cache --python /opt/venv/bin/python --no-deps \
+      --no-build-isolation \
+      --default-index "${PYTHON_INDEX_URL}" \
+      /opt/frameworks/segmentation_models_pytorch
+RUN uv pip install --no-cache --python /opt/venv/bin/python \
+      --default-index "${PYTHON_INDEX_URL}" \
+      numpy==1.26.4 opencv-python-headless==4.10.0.84 pandas==1.5.3 \
+      protobuf==3.20.3 onnxruntime==1.18.1 onnxsim==0.4.36 \
+      pyyaml tqdm requests scipy seaborn psutil tensorboard matplotlib \
+      py-cpuinfo addict pycocotools gitpython ipython && \
+    uv pip install --no-cache --python /opt/venv/bin/python --no-deps \
+      --default-index "${PYTHON_INDEX_URL}" thop && \
+    /opt/venv/bin/python -c \
+      "import torch, torchvision; assert torch.__version__ == '${TORCH_VERSION}', torch.__version__; assert torchvision.__version__ == '${TORCHVISION_VERSION}', torchvision.__version__; expected = '${EXPECTED_CUDA_VERSION}'; actual = torch.version.cuda or 'none'; assert actual == expected, (actual, expected); print(torch.__version__, torchvision.__version__, actual)"
+
+ARG YOLOV5_COMMIT=d25a07534c14f44296f9444bab2aa5c601cdaaab
+ARG YOLOV6_COMMIT=0e7c2d5a93f6d49ed5ab6f005ccdd9d9bbd3db9b
+ARG YOLOV7_COMMIT=c2d39f4db6b82800ce6c61740be5ef82854c5d3e
+ARG YOLOV8_COMMIT=4674fe6e003dfbc5f2250d3b39dd31faaf7a9877
+ARG YOLOV10_COMMIT=81f32c4ee396e679b489ff786faa0f9fa0eec298
+ARG YOLO11_COMMIT=0692e9297670acf4cc6d0cec773d7a9493cb8a5f
+COPY third_party/training/yolov5 /opt/frameworks/yolov5
+COPY third_party/training/yolov6 /opt/frameworks/yolov6
+COPY third_party/training/yolov7 /opt/frameworks/yolov7
+COPY third_party/training/yolov8 /opt/frameworks/yolov8
+COPY third_party/training/yolov10 /opt/frameworks/yolov10
+COPY third_party/training/yolo11 /opt/frameworks/yolo11
+COPY third_party/training/weights /opt/weights
+RUN test -f /opt/frameworks/yolov5/train.py \
+    && test -f /opt/frameworks/yolov6/tools/train.py \
+    && test -f /opt/frameworks/yolov7/train.py \
+    && test -f /opt/frameworks/yolov8/ultralytics/__init__.py \
+    && test -f /opt/frameworks/yolov10/ultralytics/__init__.py \
+    && test -f /opt/frameworks/yolo11/ultralytics/__init__.py \
+    && grep -Fx "yolov5 ${YOLOV5_COMMIT}" /opt/frameworks/SOURCES.lock \
+    && grep -Fx "yolov6 ${YOLOV6_COMMIT}" /opt/frameworks/SOURCES.lock \
+    && grep -Fx "yolov7 ${YOLOV7_COMMIT}" /opt/frameworks/SOURCES.lock \
+    && grep -Fx "yolov8 ${YOLOV8_COMMIT}" /opt/frameworks/SOURCES.lock \
+    && grep -Fx "yolov10 ${YOLOV10_COMMIT}" /opt/frameworks/SOURCES.lock \
+    && grep -Fx "yolo11 ${YOLO11_COMMIT}" /opt/frameworks/SOURCES.lock \
+    && cd /opt/weights && sha256sum --check SHA256SUMS
+
+COPY backend ./backend
+COPY workers ./workers
+COPY config ./config
+
+RUN rm -rf /root/.cache /tmp/* /var/tmp/* /var/lib/apt/lists/* \
+      /usr/local/bin/uv /usr/local/lib/python3.11/site-packages/uv-* \
+      /opt/venv/lib/python3.11/site-packages/torch/include \
+      /opt/venv/lib/python3.11/site-packages/torch/test \
+      /opt/conda/pkgs /opt/conda/lib/python3.11/site-packages/torch/include \
+      /opt/conda/lib/python3.11/site-packages/torch/test && \
+    find /opt/venv /opt/conda/lib/python3.11/site-packages /opt/frameworks \
+      -type d -name __pycache__ -prune -exec rm -rf '{}' + 2>/dev/null || true
+
+FROM scratch
+COPY --from=trainer-root / /
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    GIT_PYTHON_REFRESH=quiet \
+    PATH=/opt/venv/bin:/opt/conda/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
+    LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64 \
+    NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    RKNODE_YOLOV5_ROOT=/opt/frameworks/yolov5 \
+    RKNODE_YOLOV6_ROOT=/opt/frameworks/yolov6 \
+    RKNODE_YOLOV7_ROOT=/opt/frameworks/yolov7 \
+    RKNODE_YOLOV8_ROOT=/opt/frameworks/yolov8 \
+    RKNODE_YOLOV10_ROOT=/opt/frameworks/yolov10 \
+    RKNODE_YOLO11_ROOT=/opt/frameworks/yolo11 \
+    RKNODE_PRETRAINED_WEIGHTS_ROOT=/opt/weights
+
+WORKDIR /opt/rknode
+
+ARG RKNODE_RELEASE_VERSION=dev
+ARG RKNODE_SOURCE_REVISION=unknown
+ARG RKNODE_IMAGE_VARIANT=torch
+LABEL org.opencontainers.image.title="RKNode Torch Trainer" \
+      org.opencontainers.image.version="${RKNODE_RELEASE_VERSION}" \
+      org.opencontainers.image.revision="${RKNODE_SOURCE_REVISION}" \
+      io.rknode.component="trainer" \
+      io.rknode.framework="torch" \
+      io.rknode.variant="${RKNODE_IMAGE_VARIANT}" \
+      io.rknode.offline-ready="true"
+
+CMD ["python", "-m", "workers.trainer.main"]

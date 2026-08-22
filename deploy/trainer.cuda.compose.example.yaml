@@ -1,0 +1,35 @@
+# LEGACY PULL-WORKER CUDA OVERLAY. New nodes add deploy/nodes/trainer/compose.cuda.yaml
+# and deploy/nodes/trainer/compose.enrollment.yaml to the direct-node base Compose.
+services:
+  torch-trainer:
+    image: ${RKNODE_TORCH_CUDA_IMAGE:-rknode-trainer-torch-cuda12.4:2026.08.20}
+    build:
+      args:
+        BASE_IMAGE: ${RKNODE_CUDA_BASE_IMAGE:-pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime}
+    environment:
+      RKNODE_WORKER_ACCELERATOR: cuda
+      RKNODE_WORKER_NAME: ${RKNODE_TORCH_WORKER_NAME:-cuda-trainer-01}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  paddle-trainer:
+    image: ${RKNODE_PADDLE_CUDA_IMAGE:-rknode-trainer-paddle-cuda12.6:2026.08.20}
+    build:
+      args:
+        BASE_IMAGE: ${RKNODE_PADDLE_CUDA_BASE_IMAGE:-python:3.11-slim-bookworm}
+        PADDLE_INDEX_URL: ${RKNODE_PADDLE_INDEX_URL:-https://www.paddlepaddle.org.cn/packages/stable/cu126/}
+    environment:
+      RKNODE_WORKER_ACCELERATOR: cuda
+      RKNODE_WORKER_NAME: ${RKNODE_PADDLE_WORKER_NAME:-cuda-paddle-trainer-01}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

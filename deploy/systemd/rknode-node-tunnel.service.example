@@ -1,0 +1,23 @@
+[Unit]
+Description=RKNode direct-node SSH tunnel (EMERGENCY ROLLBACK ONLY)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -NT \
+  -i /path/to/rknode-node-tunnel \
+  -o BatchMode=yes \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -o StrictHostKeyChecking=yes \
+  -p 124 \
+  -L 172.29.0.1:11081:127.0.0.1:10081 \
+  -L 172.29.0.1:11082:127.0.0.1:10082 \
+  root@172.30.82.12
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

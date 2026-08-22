@@ -1,0 +1,21 @@
+{
+  "schema_version": 2,
+  "task_id": "task-ocr",
+  "revision": 4,
+  "frame_index": 21,
+  "width": 640,
+  "height": 360,
+  "detections": [],
+  "detection_results": {},
+  "result_type": "ocr_detection",
+  "result": {
+    "regions": [
+      {"confidence": 0.88, "text": "A12", "points": [[100, 100], [220, 100], [220, 150], [100, 150]]}
+    ]
+  },
+  "structured_results": {
+    "recognizer": {"type": "ocr_recognition", "result": {"text": "A12", "confidence": 0.95}}
+  },
+  "analytics": {},
+  "media": {}
+}
