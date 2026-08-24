@@ -1,24 +1,23 @@
-# LEGACY STATIC-TOKEN PULL WORKERS. New nodes use deploy/nodes/trainer/compose.yaml
-# plus deploy/nodes/trainer/compose.enrollment.yaml.
+# Legacy static-token pull workers. New deployments should use deploy/nodes/trainer.
 services:
   torch-trainer:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.trainer-torch
       args:
-        DEBIAN_MIRROR: ${RKNODE_DEBIAN_MIRROR:-http://deb.debian.org}
-        PYTHON_INDEX_URL: ${RKNODE_PYTHON_INDEX_URL:-https://pypi.org/simple}
-    image: ${RKNODE_TORCH_TRAINER_IMAGE:-rknode-trainer-torch-cpu:2026.08.20}
+        DEBIAN_MIRROR: http://deb.debian.org
+        PYTHON_INDEX_URL: https://pypi.org/simple
+    image: rknode-trainer-torch-cpu:2026.08.20
     restart: unless-stopped
     environment:
-      RKNODE_API_URL: ${RKNODE_API_URL:?set central API URL}/api/v1
-      RKNODE_WORKER_TOKEN: ${RKNODE_WORKER_TOKEN:?set worker token}
-      RKNODE_WORKER_NAME: ${RKNODE_TORCH_WORKER_NAME:-torch-trainer-01}
+      RKNODE_API_URL: http://172.16.66.249:5173/api/v1
+      RKNODE_WORKER_TOKEN: replace-with-legacy-worker-token
+      RKNODE_WORKER_NAME: torch-trainer-01
       RKNODE_WORKER_KIND: trainer
-      RKNODE_WORKER_ACCELERATOR: ${RKNODE_TORCH_ACCELERATOR:-cpu}
+      RKNODE_WORKER_ACCELERATOR: cpu
       RKNODE_WORKER_CAPABILITIES: yolo-detect,deeplabv3plus
       RKNODE_WORK_DIR: /data/jobs
-      RKNODE_WORKSPACE_RECONCILE_SECONDS: ${RKNODE_WORKSPACE_RECONCILE_SECONDS:-30}
+      RKNODE_WORKSPACE_RECONCILE_SECONDS: "30"
     volumes:
       - trainer-data:/data
 
@@ -27,19 +26,19 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.trainer-paddle
       args:
-        DEBIAN_MIRROR: ${RKNODE_DEBIAN_MIRROR:-http://deb.debian.org}
-        PYTHON_INDEX_URL: ${RKNODE_PYTHON_INDEX_URL:-https://pypi.org/simple}
-    image: ${RKNODE_PADDLE_TRAINER_IMAGE:-rknode-trainer-paddle-cpu:2026.08.20}
+        DEBIAN_MIRROR: http://deb.debian.org
+        PYTHON_INDEX_URL: https://pypi.org/simple
+    image: rknode-trainer-paddle-cpu:2026.08.20
     restart: unless-stopped
     environment:
-      RKNODE_API_URL: ${RKNODE_API_URL:?set central API URL}/api/v1
-      RKNODE_WORKER_TOKEN: ${RKNODE_WORKER_TOKEN:?set worker token}
-      RKNODE_WORKER_NAME: ${RKNODE_PADDLE_WORKER_NAME:-paddle-trainer-01}
+      RKNODE_API_URL: http://172.16.66.249:5173/api/v1
+      RKNODE_WORKER_TOKEN: replace-with-legacy-worker-token
+      RKNODE_WORKER_NAME: paddle-trainer-01
       RKNODE_WORKER_KIND: trainer
-      RKNODE_WORKER_ACCELERATOR: ${RKNODE_PADDLE_ACCELERATOR:-cpu}
+      RKNODE_WORKER_ACCELERATOR: cpu
       RKNODE_WORKER_CAPABILITIES: ppocr-det,ppocr-rec
       RKNODE_WORK_DIR: /data/jobs
-      RKNODE_WORKSPACE_RECONCILE_SECONDS: ${RKNODE_WORKSPACE_RECONCILE_SECONDS:-30}
+      RKNODE_WORKSPACE_RECONCILE_SECONDS: "30"
     volumes:
       - trainer-data:/data
 

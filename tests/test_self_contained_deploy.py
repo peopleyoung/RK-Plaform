@@ -150,27 +150,21 @@ def test_online_trainer_compose_supports_legacy_and_enrollment_credentials() -> 
         (compose_root / "compose.enrollment.yaml").read_text(encoding="utf-8")
     )
     base_environment = base["services"]["trainer"]["environment"]
-    assert base_environment["RKNODE_NODE_TOKEN"] == "${RKNODE_NODE_TOKEN:-}"
-    assert base_environment["RKNODE_NODE_TOKEN_FILE"] == (
-        "${RKNODE_NODE_TOKEN_FILE:-/data/state/node-token}"
-    )
+    assert base_environment["RKNODE_NODE_TOKEN"] == ""
+    assert base_environment["RKNODE_NODE_TOKEN_FILE"] == "/data/state/node-token"
     assert "RKNODE_WORKER_TOKEN" not in base_environment
 
     service = overlay["services"]["trainer"]
     environment = service["environment"]
-    assert environment["RKNODE_ENDPOINT_ID"] == (
-        "${RKNODE_ENDPOINT_ID:?set endpoint ID from the platform}"
-    )
-    assert environment["RKNODE_PLATFORM_URL"] == (
-        "${RKNODE_PLATFORM_URL:?set central platform URL}"
-    )
     assert environment["RKNODE_ENROLLMENT_TOKEN_FILE"] == (
         "/run/secrets/rknode-enrollment-token"
     )
-    assert environment["RKNODE_NODE_TOKEN_FILE"] == "/data/state/node-token"
+    assert base_environment["RKNODE_ENDPOINT_ID"] == "service_0cf22ac464894472a75c21c3e20e9a48"
+    assert base_environment["RKNODE_PLATFORM_URL"] == "http://172.16.66.249:5173"
+    assert base_environment["RKNODE_NODE_TOKEN_FILE"] == "/data/state/node-token"
     assert service["secrets"] == ["rknode-enrollment-token"]
     assert overlay["secrets"]["rknode-enrollment-token"]["file"] == (
-        "${RKNODE_ENROLLMENT_TOKEN_PATH:?set enrollment token file path}"
+        "./secrets/trainer-enrollment-token"
     )
 
 
@@ -183,16 +177,16 @@ def test_online_rk3588_compose_isolates_converter_and_inference_enrollment() -> 
 
     expected = {
         "converter": (
-            "${RKNODE_CONVERTER_ENDPOINT_ID:?set converter endpoint ID from the platform}",
+            "service_5918689191d54b75ade96d21375d5872",
             "rknode-converter-enrollment-token",
-            "${RKNODE_CONVERTER_ENROLLMENT_TOKEN_PATH:?set converter enrollment token file path}",
-            "${RKNODE_CONVERTER_TOKEN:-}",
+            "./secrets/converter-enrollment-token",
+            "",
         ),
         "inference": (
-            "${RKNODE_INFERENCE_ENDPOINT_ID:?set inference endpoint ID from the platform}",
+            "service_7a6d0eaba81c4cf9be13f60b223e2f7d",
             "rknode-inference-enrollment-token",
-            "${RKNODE_INFERENCE_ENROLLMENT_TOKEN_PATH:?set inference enrollment token file path}",
-            "${RKNODE_INFERENCE_TOKEN:-}",
+            "./secrets/inference-enrollment-token",
+            "",
         ),
     }
     for service_name, (endpoint_id, secret_name, secret_path, legacy_token) in expected.items():
@@ -202,25 +196,19 @@ def test_online_rk3588_compose_isolates_converter_and_inference_enrollment() -> 
         assert "RKNODE_WORKER_TOKEN" not in base_environment
         service = overlay["services"][service_name]
         environment = service["environment"]
-        assert environment["RKNODE_ENDPOINT_ID"] == endpoint_id
-        assert environment["RKNODE_PLATFORM_URL"] == (
-            "${RKNODE_PLATFORM_URL:?set central platform URL}"
-        )
         assert environment["RKNODE_ENROLLMENT_TOKEN_FILE"] == (
             "/run/secrets/rknode-enrollment-token"
         )
-        assert environment["RKNODE_NODE_TOKEN_FILE"] == "/data/state/node-token"
+        assert base_environment["RKNODE_ENDPOINT_ID"] == endpoint_id
+        assert base_environment["RKNODE_PLATFORM_URL"] == "http://172.16.66.249:5173"
+        assert base_environment["RKNODE_NODE_TOKEN_FILE"] == "/data/state/node-token"
         assert service["secrets"] == [
             {"source": secret_name, "target": "rknode-enrollment-token"}
         ]
         assert overlay["secrets"][secret_name]["file"] == secret_path
 
-    assert base["services"]["converter"]["ports"] == [
-        "${RKNODE_CONVERTER_HOST_PORT:-10081}:10081"
-    ]
-    assert base["services"]["inference"]["ports"] == [
-        "${RKNODE_INFERENCE_HOST_PORT:-10082}:10081"
-    ]
+    assert base["services"]["converter"]["ports"] == ["10081:10081"]
+    assert base["services"]["inference"]["ports"] == ["10082:10081"]
     assert base["services"]["converter"]["volumes"] == ["converter-data:/data"]
     assert "inference-data:/data" in base["services"]["inference"]["volumes"]
 

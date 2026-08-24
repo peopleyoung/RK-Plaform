@@ -1,0 +1,19 @@
+services:
+  trainer:
+    build:
+      dockerfile: deploy/Dockerfile.trainer-paddle
+      args:
+        BASE_IMAGE: python:3.11-slim-bookworm
+        DEBIAN_MIRROR: http://deb.debian.org
+        PADDLE_PACKAGE: paddlepaddle==3.2.2
+        PADDLE_INDEX_URL: https://pypi.org/simple
+        PYTHON_INDEX_URL: https://pypi.org/simple
+    image: rknode-trainer-paddle-cpu:2026.08.20
+    environment:
+      RKNODE_ENDPOINT_ID: replace-with-paddle-cpu-endpoint-id
+      RKNODE_NODE_NAME: cpu-paddle-trainer-01
+      RKNODE_NODE_ACCELERATOR: cpu
+      RKNODE_NODE_CAPABILITIES: ppocr-det,ppocr-rec
+      RKNODE_WORKER_NAME: cpu-paddle-trainer-01
+      RKNODE_WORKER_ACCELERATOR: cpu
+      RKNODE_WORKER_CAPABILITIES: ppocr-det,ppocr-rec

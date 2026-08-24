@@ -21,3 +21,4 @@ coverage.xml
 *.pt
 *.pdparams
 release/offline/
+**/secrets/

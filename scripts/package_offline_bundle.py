@@ -9,7 +9,6 @@ import hashlib
 import json
 import platform
 import re
-import shlex
 import shutil
 import subprocess
 import tarfile
@@ -28,7 +27,6 @@ class BundleSpec:
     images: tuple[str, ...]
     template_dir: str
     compose_files: tuple[str, ...]
-    env_example: str
     health_kind: str
     project: str
     default_version: str
@@ -44,7 +42,6 @@ SPECS = {
         ),
         "platform",
         ("compose.yaml",),
-        ".env.example",
         "platform",
         "rknode-platform",
         "2026.08.20",
@@ -53,8 +50,7 @@ SPECS = {
         "arm64",
         ("rknode-rk3588-node:{version}",),
         "rk3588",
-        ("compose.converter.yaml", "compose.enrollment.yaml"),
-        "converter.env.example",
+        ("compose.converter.yaml", "compose.enrollment.converter.yaml"),
         "converter",
         "rknode-converter",
         "2026.08.20-business",
@@ -63,8 +59,7 @@ SPECS = {
         "arm64",
         ("rknode-rk3588-node:{version}",),
         "rk3588",
-        ("compose.inference.yaml", "compose.enrollment.yaml"),
-        "inference.env.example",
+        ("compose.inference.yaml", "compose.enrollment.inference.yaml"),
         "inference",
         "rknode-inference",
         "2026.08.20-business",
@@ -74,7 +69,6 @@ SPECS = {
         ("rknode-rk3588-node:{version}",),
         "rk3588",
         ("compose.converter.yaml", "compose.inference.yaml", "compose.enrollment.yaml"),
-        "node.env.example",
         "rk3588",
         "rknode-rk3588",
         "2026.08.20-business",
@@ -173,35 +167,18 @@ def main() -> None:
     template_root = OFFLINE_ROOT / spec.template_dir
     for compose_file in spec.compose_files:
         copy_template(template_root / compose_file, destination / compose_file, version)
-    copy_template(template_root / spec.env_example, destination / ".env.example", version)
 
     for script_name in ("load-images.sh", "deploy.sh", "verify.sh", "stop.sh"):
         target = destination / script_name
         shutil.copy2(OFFLINE_ROOT / "common" / script_name, target)
         target.chmod(0o755)
+    target = destination / "read-manifest.py"
+    shutil.copy2(OFFLINE_ROOT / "common" / "read-manifest.py", target)
+    target.chmod(0o755)
     if spec.health_kind == "platform":
         target = destination / "configure-media-secrets.py"
         shutil.copy2(ROOT / "scripts" / "configure_media_secrets.py", target)
         target.chmod(0o755)
-    if spec.health_kind == "platform":
-        target = destination / "configure-media-secrets.py"
-        shutil.copy2(ROOT / "scripts" / "configure_media_secrets.py", target)
-        target.chmod(0o755)
-
-    bundle_env = {
-        "RKNODE_BUNDLE_NAME": bundle_name,
-        "RKNODE_BUNDLE_VERSION": version,
-        "RKNODE_EXPECTED_ARCH": spec.arch,
-        "RKNODE_IMAGES": " ".join(image_names),
-        "RKNODE_COMPOSE_FILES": " ".join(spec.compose_files),
-        "RKNODE_ENV_EXAMPLE": ".env.example",
-        "RKNODE_HEALTH_KIND": spec.health_kind,
-        "RKNODE_COMPOSE_PROJECT": spec.project,
-    }
-    (destination / "bundle.env").write_text(
-        "".join(f"{key}={shlex.quote(value)}\n" for key, value in bundle_env.items()),
-        encoding="utf-8",
-    )
 
     if len(image_names) != len(inspected):
         raise RuntimeError("Docker image inspection returned an incomplete result")
@@ -233,6 +210,8 @@ def main() -> None:
         "bundle": bundle_name,
         "releaseVersion": version,
         "architecture": spec.arch,
+        "healthKind": spec.health_kind,
+        "composeProject": spec.project,
         "images": manifest_images,
         "composeFiles": list(spec.compose_files),
         "requiresNetworkDuringDeploy": False,
@@ -253,6 +232,24 @@ def main() -> None:
         encoding="utf-8",
     )
 
+    enrollment_commands = (
+        "./deploy.sh --enroll\n./verify.sh --enroll"
+        if spec.health_kind != "platform"
+        else "./deploy.sh\n./verify.sh"
+    )
+    enrollment_note = (
+        "For first-time node enrollment, create the documented secret file and use --enroll."
+        if spec.health_kind != "platform"
+        else "For platform deployment, edit the Compose anchors before starting."
+    )
+    steady_state_note = (
+        "After the node is `enrolled + online`, run `./deploy.sh && ./verify.sh` without\n"
+        "`--enroll`. Confirm the container no longer mounts the enrollment secret, then delete\n"
+        "that one-time file and verify one more stop/deploy cycle."
+        if spec.health_kind != "platform"
+        else "The platform bundle has no enrollment overlay; keep the Compose anchors protected\n"
+        "and run `./deploy.sh && ./verify.sh`."
+    )
     readme = f"""# {bundle_name}
 
 This is a no-network deployment bundle for `{spec.arch}`. It contains Docker images,
@@ -261,20 +258,16 @@ Compose configuration, checksums, and no credentials or persistent business data
 ```bash
 sha256sum -c SHA256SUMS
 ./load-images.sh
-cp .env.example .env
-# Edit .env: platform address, endpoint ID, enrollment secret path, node name and ports.
-./deploy.sh
-./verify.sh
+# Edit compose*.yaml: platform address, endpoint IDs, node names and ports.
+# {enrollment_note}
+{enrollment_commands}
 ```
 
-After the node is `enrolled + online`, keep the enrollment secret in place, set
-`RKNODE_ENROLLMENT_COMPLETE=true` in `.env`, clear legacy static token variables, and run
-`./deploy.sh && ./verify.sh` again. Confirm the container no longer mounts the enrollment
-secret, then delete that one-time file and verify one more stop/deploy cycle.
+{steady_state_note}
 
-`deploy.sh` always uses `--pull never --no-build`. When enrollment is complete, all runtime
-scripts skip `compose.enrollment.yaml`. Stop containers while retaining data with `./stop.sh`.
-Do not delete Compose volumes during an upgrade or rollback.
+`deploy.sh` always uses `--pull never --no-build`. Runtime metadata comes from
+`manifest.json`; no `.env` or `bundle.env` file is used. Stop containers while retaining
+data with `./stop.sh`. Do not delete Compose volumes during an upgrade or rollback.
 """
     (destination / "README.md").write_text(readme, encoding="utf-8")
 

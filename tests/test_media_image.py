@@ -6,11 +6,11 @@ import subprocess
 from pathlib import Path
 
 import yaml
+from backend.platform_api.app import create_app
+from backend.platform_api.settings import Settings
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from backend.platform_api.app import create_app
-from backend.platform_api.settings import Settings
 from tests.conftest import ADMIN_HEADERS
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -101,15 +101,12 @@ def test_online_compose_owns_media_ports_health_and_secret_boundaries() -> None:
     services = compose["services"]
     assert set(services) == {"api", "frontend", "media"}
     media = services["media"]
-    assert media["image"] == "${RKNODE_MEDIA_IMAGE:-rknode-platform-media:2026.08.20}"
-    assert media["ports"] == [
-        "${RKNODE_MEDIA_RTSP_PORT:-8554}:554",
-        "${RKNODE_MEDIA_WS_PORT:-8081}:80",
-    ]
+    assert media["image"] == "rknode-platform-media:2026.08.20"
+    assert media["ports"] == ["8554:554", "8081:80"]
     assert media["restart"] == "unless-stopped"
     assert "healthcheck" in media
     assert "logging" in media
-    assert services["frontend"]["ports"] == ["${RKNODE_WEB_PORT:-5173}:80"]
+    assert services["frontend"]["ports"] == ["5173:80"]
     for variable in ("RKNODE_ZLM_API_SECRET", "RKNODE_ZLM_HOOK_IDENTITY"):
         assert variable in services["api"]["environment"]
         assert variable in media["environment"]
@@ -117,13 +114,18 @@ def test_online_compose_owns_media_ports_health_and_secret_boundaries() -> None:
 
 
 def test_media_secret_configurator_is_idempotent_and_quiet(tmp_path: Path) -> None:
-    target = tmp_path / ".env"
-    target.write_text("KEEP=value\nRKNODE_ZLM_API_SECRET=existing\n", encoding="utf-8")
+    target = tmp_path / "compose.yaml"
+    target.write_text(
+        "x-rknode-platform-config:\n"
+        "  zlm-api-secret: &zlm-api-secret replace-with-zlm-api-secret\n"
+        "  zlm-hook-identity: &zlm-hook-identity replace-with-zlm-hook-identity\n",
+        encoding="utf-8",
+    )
     result = subprocess.run(
         [
             "python3",
             str(ROOT / "scripts" / "configure_media_secrets.py"),
-            "--env-file",
+            "--compose-file",
             str(target),
         ],
         check=True,
@@ -133,11 +135,24 @@ def test_media_secret_configurator_is_idempotent_and_quiet(tmp_path: Path) -> No
     assert result.stdout == ""
     assert result.stderr == ""
     content = target.read_text(encoding="utf-8")
-    assert "KEEP=value" in content
-    assert "RKNODE_ZLM_API_SECRET=existing" in content
-    identity = re.search(r"^RKNODE_ZLM_HOOK_IDENTITY=([a-f0-9]{64})$", content, re.M)
+    secret = re.search(r"zlm-api-secret: &zlm-api-secret ([a-f0-9]{64})$", content, re.M)
+    identity = re.search(r"zlm-hook-identity: &zlm-hook-identity ([a-f0-9]{64})$", content, re.M)
+    assert secret is not None
     assert identity is not None
     assert target.stat().st_mode & 0o777 == 0o600
+    first = content
+    subprocess.run(
+        [
+            "python3",
+            str(ROOT / "scripts" / "configure_media_secrets.py"),
+            "--compose-file",
+            str(target),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert target.read_text(encoding="utf-8") == first
 
 
 def test_api_bootstraps_builtin_gateway_without_overwriting_operator_identity(

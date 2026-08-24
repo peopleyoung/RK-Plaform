@@ -1,0 +1,16 @@
+services:
+  trainer:
+    image: rknode-trainer-torch-cuda12.4:2026.08.20
+    environment:
+      RKNODE_ENDPOINT_ID: replace-with-torch-cuda-endpoint-id
+      RKNODE_NODE_NAME: cuda-torch-trainer-01
+      RKNODE_NODE_ACCELERATOR: cuda
+      RKNODE_WORKER_NAME: cuda-torch-trainer-01
+      RKNODE_WORKER_ACCELERATOR: cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

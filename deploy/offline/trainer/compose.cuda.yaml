@@ -5,5 +5,5 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: ${RKNODE_CUDA_DEVICE_COUNT:-1}
+              count: 1
               capabilities: [gpu]

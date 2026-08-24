@@ -1,5 +1,5 @@
 services:
-  trainer:
+  inference:
     environment:
       RKNODE_ENROLLMENT_TOKEN_FILE: /run/secrets/rknode-enrollment-token
     secrets:
@@ -7,4 +7,4 @@ services:
 
 secrets:
   rknode-enrollment-token:
-    file: ./secrets/trainer-enrollment-token
+    file: ./secrets/inference-enrollment-token

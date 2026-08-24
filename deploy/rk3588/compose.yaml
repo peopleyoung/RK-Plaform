@@ -1,5 +1,4 @@
-# LEGACY PULL WORKER/AGENT COMPOSE. New RK3588 deployments use
-# deploy/nodes/rk3588/compose.yaml plus compose.enrollment.yaml.
+# Legacy pull Worker/Agent deployment. New deployments use deploy/nodes/rk3588.
 services:
   converter:
     build:
@@ -7,10 +6,10 @@ services:
       dockerfile: deploy/rk3588/Dockerfile.node
       target: rknode-runtime
       args:
-        RKNN_TOOLKIT_IMAGE: ${RKNODE_CONVERTER_BASE_IMAGE:-rknn_toolkit2:2.3.2-debian12-cp311-aarch64}
-        DEBIAN_MIRROR: ${RKNODE_DEBIAN_MIRROR:-http://deb.debian.org}
-        PYTHON_INDEX_URL: ${RKNODE_PYTHON_INDEX_URL:-https://pypi.org/simple}
-    image: ${RKNODE_CONVERTER_IMAGE:-${RKNODE_RK3588_IMAGE:-rknode-rk3588-node:2026.08.20-business}}
+        RKNN_TOOLKIT_IMAGE: rknn_toolkit2:2.3.2-debian12-cp311-aarch64
+        DEBIAN_MIRROR: http://deb.debian.org
+        PYTHON_INDEX_URL: https://pypi.org/simple
+    image: rknode-rk3588-node:2026.08.20-business
     restart: unless-stopped
     network_mode: host
     devices:
@@ -19,16 +18,16 @@ services:
     working_dir: /opt/rknode
     command: ["python3", "-m", "workers.converter.main"]
     environment:
-      RKNODE_API_URL: ${RKNODE_API_URL:?set central API URL}/api/v1
-      RKNODE_WORKER_TOKEN: ${RKNODE_WORKER_TOKEN:?set worker token}
-      RKNODE_WORKER_NAME: ${RKNODE_WORKER_NAME:-rk3588-converter-01}
+      RKNODE_API_URL: http://172.16.66.249:5173/api/v1
+      RKNODE_WORKER_TOKEN: replace-with-legacy-worker-token
+      RKNODE_WORKER_NAME: rk3588-converter-01
       RKNODE_WORKER_KIND: converter
       RKNODE_WORKER_ACCELERATOR: rk3588
       RKNODE_WORKER_CAPABILITIES: yolo-detect,deeplabv3plus,ppocr-det,ppocr-rec
       RKNODE_WORKER_VERSION: rknn-toolkit2-2.3.2
       RKNODE_WORK_DIR: /data/jobs
-      RKNODE_LEASE_RENEW_SECONDS: 30
-      RKNODE_WORKSPACE_RECONCILE_SECONDS: ${RKNODE_WORKSPACE_RECONCILE_SECONDS:-30}
+      RKNODE_LEASE_RENEW_SECONDS: "30"
+      RKNODE_WORKSPACE_RECONCILE_SECONDS: "30"
     volumes:
       - converter-data:/data
 
@@ -38,10 +37,10 @@ services:
       dockerfile: deploy/rk3588/Dockerfile.node
       target: rknode-runtime
       args:
-        RKNN_TOOLKIT_IMAGE: ${RKNODE_CONVERTER_BASE_IMAGE:-rknn_toolkit2:2.3.2-debian12-cp311-aarch64}
-        DEBIAN_MIRROR: ${RKNODE_DEBIAN_MIRROR:-http://deb.debian.org}
-        PYTHON_INDEX_URL: ${RKNODE_PYTHON_INDEX_URL:-https://pypi.org/simple}
-    image: ${RKNODE_INFERENCE_IMAGE:-${RKNODE_RK3588_IMAGE:-rknode-rk3588-node:2026.08.20-business}}
+        RKNN_TOOLKIT_IMAGE: rknn_toolkit2:2.3.2-debian12-cp311-aarch64
+        DEBIAN_MIRROR: http://deb.debian.org
+        PYTHON_INDEX_URL: https://pypi.org/simple
+    image: rknode-rk3588-node:2026.08.20-business
     init: true
     restart: unless-stopped
     network_mode: host
@@ -56,32 +55,32 @@ services:
     working_dir: /opt/rknode
     command: ["python3", "-m", "workers.inference_agent.main"]
     environment:
-      RKNODE_API_URL: ${RKNODE_API_URL:?set central API URL}/api/v1
-      RKNODE_NODE_ID: ${RKNODE_NODE_ID:?create the RK3588 node in the console first}
-      RKNODE_REGISTRATION_TOKEN: ${RKNODE_REGISTRATION_TOKEN:-}
-      RKNODE_HARDWARE_ID: ${RKNODE_HARDWARE_ID:-rk3588-board}
-      RKNODE_RUNTIME_VERSION: ${RKNODE_RUNTIME_VERSION:-rknn-runtime-2.3.2}
-      RKNODE_DRIVER_VERSION: ${RKNODE_DRIVER_VERSION:-unknown}
-      RKNODE_PIPELINE_VERSION: ${RKNODE_PIPELINE_VERSION:-rknode-cpp-runtime-2026.08.20-business}
-      RKNODE_ADAPTERS: ${RKNODE_ADAPTERS:-yolo_dfl_split_v1,deeplab_logits_v1,ppocr_db_det_v1,ppocr_ctc_rec_v1}
-      RKNODE_MEDIA_FEATURES: ${RKNODE_MEDIA_FEATURES:-rkmpp_decode,bytetrack,kafka,zlm_sei,analytics_area,analytics_line,event_snapshot,event_record,secondary_infer}
+      RKNODE_API_URL: http://172.16.66.249:5173/api/v1
+      RKNODE_NODE_ID: replace-with-legacy-inference-node-id
+      RKNODE_REGISTRATION_TOKEN: replace-with-one-time-registration-token
+      RKNODE_HARDWARE_ID: rk3588-board-01
+      RKNODE_RUNTIME_VERSION: rknn-runtime-2.3.2
+      RKNODE_DRIVER_VERSION: unknown
+      RKNODE_PIPELINE_VERSION: rknode-cpp-runtime-2026.08.20-business
+      RKNODE_ADAPTERS: yolo_dfl_split_v1,deeplab_logits_v1,ppocr_db_det_v1,ppocr_ctc_rec_v1
+      RKNODE_MEDIA_FEATURES: rkmpp_decode,bytetrack,kafka,zlm_sei,analytics_area,analytics_line,event_snapshot,event_record,secondary_infer
       RKNODE_MODEL_DIR: /data/models
       RKNODE_STATE_DIR: /data/state
-      RKNODE_STAGING_ONLY: ${RKNODE_STAGING_ONLY:-false}
-      RKNODE_SELF_TEST_COMMAND: ${RKNODE_SELF_TEST_COMMAND:-/opt/rknode/runtime-adapter/self-test.sh}
-      RKNODE_MODEL_PROBE_COMMAND: ${RKNODE_MODEL_PROBE_COMMAND:-/opt/rknode/runtime-adapter/probe-model.sh}
-      RKNODE_RUNTIME_COMMAND: ${RKNODE_RUNTIME_COMMAND:-/opt/rknode/runtime-adapter/activate-task.sh}
-      RKNODE_RUNTIME_HEALTH_COMMAND: ${RKNODE_RUNTIME_HEALTH_COMMAND:-/opt/rknode/runtime-adapter/health.sh}
-      RKNODE_RUNTIME_TIMEOUT_SECONDS: ${RKNODE_RUNTIME_TIMEOUT_SECONDS:-120}
-      RKNODE_POLL_SECONDS: ${RKNODE_POLL_SECONDS:-3}
+      RKNODE_STAGING_ONLY: "false"
+      RKNODE_SELF_TEST_COMMAND: /opt/rknode/runtime-adapter/self-test.sh
+      RKNODE_MODEL_PROBE_COMMAND: /opt/rknode/runtime-adapter/probe-model.sh
+      RKNODE_RUNTIME_COMMAND: /opt/rknode/runtime-adapter/activate-task.sh
+      RKNODE_RUNTIME_HEALTH_COMMAND: /opt/rknode/runtime-adapter/health.sh
+      RKNODE_RUNTIME_TIMEOUT_SECONDS: "120"
+      RKNODE_POLL_SECONDS: "3"
       RKNODE_RUNTIME_STATE_DIR: /data/runtime
       RKNODE_INFERENCE_OUTPUT_DIR: /data/output
-      RKNODE_REQUIRE_NPU_DEVICE: ${RKNODE_REQUIRE_NPU_DEVICE:-true}
-      RKNODE_AUTO_RECOVER: ${RKNODE_AUTO_RECOVER:-true}
-      RKNODE_RESULT_SINK_TOKEN: ${RKNODE_RESULT_SINK_TOKEN:-}
+      RKNODE_REQUIRE_NPU_DEVICE: "true"
+      RKNODE_AUTO_RECOVER: "true"
+      RKNODE_RESULT_SINK_TOKEN: ""
     volumes:
       - inference-models:/data
-      - ${RKNODE_INFERENCE_OUTPUT_DIR:-./output}:/data/output
+      - ./output:/data/output
       - /sys/firmware/devicetree/base:/sys/firmware/devicetree/base:ro
 
 volumes:

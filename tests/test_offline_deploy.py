@@ -13,8 +13,8 @@ OFFLINE_ROOT = ROOT / "deploy" / "offline"
 def test_template_version_rewrite_does_not_duplicate_business_suffix(
     tmp_path: Path,
 ) -> None:
-    source = tmp_path / "source.env"
-    destination = tmp_path / "destination.env"
+    source = tmp_path / "source.yaml"
+    destination = tmp_path / "destination.yaml"
     source.write_text(
         "BASE_IMAGE=example:2026.08.15\n"
         "BUSINESS_IMAGE=example:2026.08.15-business\n",
@@ -31,13 +31,22 @@ def test_template_version_rewrite_does_not_duplicate_business_suffix(
 
 def test_offline_compose_files_never_build_or_pull() -> None:
     compose_files = sorted(OFFLINE_ROOT.glob("**/compose*.yaml"))
-    assert len(compose_files) == 7
+    assert len(compose_files) == 13
     for path in compose_files:
         text = path.read_text(encoding="utf-8")
         assert "build:" not in text
-        if path.name not in {"compose.cuda.yaml", "compose.enrollment.yaml"}:
-            assert "pull_policy: never" in text
-            assert "image: ${RKNODE_" in text
+        assert "${" not in text
+
+    runtime_compose_files = (
+        OFFLINE_ROOT / "platform" / "compose.yaml",
+        OFFLINE_ROOT / "trainer" / "compose.yaml",
+        OFFLINE_ROOT / "rk3588" / "compose.converter.yaml",
+        OFFLINE_ROOT / "rk3588" / "compose.inference.yaml",
+    )
+    for path in runtime_compose_files:
+        text = path.read_text(encoding="utf-8")
+        assert "pull_policy: never" in text
+        assert re.search(r"image: rknode-.+:2026\.08\.20", text)
 
     trainer = (OFFLINE_ROOT / "trainer" / "compose.yaml").read_text(encoding="utf-8")
     assert 'command: ["python", "-m", "workers.node_service.main"]' in trainer
@@ -50,13 +59,12 @@ def test_offline_enrollment_overlays_match_the_online_bootstrap_contract() -> No
         )
     )
     trainer_environment = trainer["services"]["trainer"]["environment"]
-    assert trainer_environment["RKNODE_NODE_TOKEN"] == ""
-    assert trainer_environment["RKNODE_ENDPOINT_ID"].startswith("${RKNODE_ENDPOINT_ID:?")
-    assert trainer_environment["RKNODE_PLATFORM_URL"].startswith("${RKNODE_PLATFORM_URL:?")
     assert trainer_environment["RKNODE_ENROLLMENT_TOKEN_FILE"] == (
         "/run/secrets/rknode-enrollment-token"
     )
-    assert trainer_environment["RKNODE_NODE_TOKEN_FILE"] == "/data/state/node-token"
+    assert trainer["secrets"]["rknode-enrollment-token"]["file"] == (
+        "./secrets/trainer-enrollment-token"
+    )
 
     rk3588 = yaml.safe_load(
         (OFFLINE_ROOT / "rk3588" / "compose.enrollment.yaml").read_text(
@@ -65,39 +73,33 @@ def test_offline_enrollment_overlays_match_the_online_bootstrap_contract() -> No
     )
     converter = rk3588["services"]["converter"]
     inference = rk3588["services"]["inference"]
-    assert converter["environment"]["RKNODE_ENDPOINT_ID"].startswith(
-        "${RKNODE_CONVERTER_ENDPOINT_ID:?"
-    )
-    assert inference["environment"]["RKNODE_ENDPOINT_ID"].startswith(
-        "${RKNODE_INFERENCE_ENDPOINT_ID:?"
-    )
     assert converter["secrets"] != inference["secrets"]
-    assert converter["environment"]["RKNODE_NODE_TOKEN"] == ""
-    assert inference["environment"]["RKNODE_NODE_TOKEN"] == ""
     assert set(rk3588["secrets"]) == {
         "rknode-converter-enrollment-token",
         "rknode-inference-enrollment-token",
     }
+    assert rk3588["secrets"]["rknode-converter-enrollment-token"]["file"] == (
+        "./secrets/converter-enrollment-token"
+    )
+    assert rk3588["secrets"]["rknode-inference-enrollment-token"]["file"] == (
+        "./secrets/inference-enrollment-token"
+    )
 
 
-def test_offline_examples_use_fixed_release_tags_and_no_secrets() -> None:
+def test_offline_compose_profiles_use_fixed_release_tags_and_no_env_files() -> None:
     version = (OFFLINE_ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    examples = sorted(OFFLINE_ROOT.glob("**/*.env.example"))
-    assert len(examples) == 8
-    for path in examples:
+    assert not list((ROOT / "deploy").glob("**/*.env.example"))
+    profiles = sorted(OFFLINE_ROOT.glob("**/compose*.yaml"))
+    assert profiles
+    for path in profiles:
         text = path.read_text(encoding="utf-8")
         assert ":latest" not in text
-        images = re.findall(r"^RKNODE_[A-Z0-9_]+_IMAGE=(.+)$", text, re.MULTILINE)
-        assert images
-        if path.parent.name == "rk3588":
-            expected_version = "2026.08.20-business"
-        elif path.parent.name == "trainer":
-            expected_version = "2026.08.20"
-        else:
-            expected_version = version
+        assert "${" not in text
+        images = re.findall(r"^\s+image:\s+(.+)$", text, re.MULTILINE)
         for image in images:
+            expected_version = "2026.08.20-business" if path.parent.name == "rk3588" else version
             assert image.endswith(f":{expected_version}")
-        assert not re.search(r"=(?:direct-|[a-f0-9]{32,})$", text, re.MULTILINE)
+        assert not re.search(r"\b[a-f0-9]{48,}\b", text)
 
 
 def test_all_delivery_images_have_offline_oci_labels() -> None:
@@ -181,7 +183,7 @@ def test_paddle_cuda_delivery_uses_the_pinned_cu126_stack() -> None:
     packager = (ROOT / "scripts" / "package_offline_bundle.py").read_text(
         encoding="utf-8"
     )
-    env_example = (OFFLINE_ROOT / "trainer" / "paddle-cuda.env.example").read_text(
+    compose_profile = (OFFLINE_ROOT / "trainer" / "compose.paddle-cuda.yaml").read_text(
         encoding="utf-8"
     )
 
@@ -189,7 +191,7 @@ def test_paddle_cuda_delivery_uses_the_pinned_cu126_stack() -> None:
     assert "https://www.paddlepaddle.org.cn/packages/stable/cu126/" in build_script
     assert "rknode-trainer-paddle-cuda12.6" in build_script
     assert "rknode-trainer-paddle-cuda12.6" not in packager
-    assert "rknode-trainer-paddle-cuda12.6" in env_example
+    assert "rknode-trainer-paddle-cuda12.6" in compose_profile
     assert "paddlepaddle-gpu==3.2.2" in build_script
     assert "version('paddlepaddle-gpu')" in dockerfile
     assert "libpaddle.so" in dockerfile
@@ -201,15 +203,14 @@ def test_bundle_runtime_scripts_enforce_no_network_deployment() -> None:
     loader = (OFFLINE_ROOT / "common" / "load-images.sh").read_text(encoding="utf-8")
     assert "--pull never --no-build" in deploy
     assert "docker image inspect" in deploy
-    assert "RKNODE_EXPECTED_ARCH" in deploy
-    assert "compose.enrollment.yaml" in deploy
-    assert "RKNODE_ENROLLMENT_TOKEN_PATH" in deploy
-    assert "RKNODE_CONVERTER_ENROLLMENT_TOKEN_PATH" in deploy
-    assert "RKNODE_INFERENCE_ENROLLMENT_TOKEN_PATH" in deploy
-    assert "RKNODE_ENROLLMENT_COMPLETE" in deploy
-    assert "must be true or false" in deploy
-    assert '"${compose_file}" == "compose.enrollment.yaml"' in deploy
-    assert "clear ${token_variable}" in deploy
+    assert "read-manifest.py architecture" in deploy
+    assert "--enroll" in deploy
+    assert "*enrollment*.yaml" in deploy
+    assert "./secrets/trainer-enrollment-token" in deploy
+    assert "./secrets/converter-enrollment-token" in deploy
+    assert "./secrets/inference-enrollment-token" in deploy
+    assert "source ./.env" not in deploy
+    assert "source ./bundle.env" not in deploy
     assert "sha256sum -c SHA256SUMS" in loader
     assert 'io.rknode.offline-ready' in loader
     assert 'org.opencontainers.image.version' in loader
@@ -218,10 +219,9 @@ def test_bundle_runtime_scripts_enforce_no_network_deployment() -> None:
     assert "stat -c %a /data/state/node-token" in verify
     assert "urllib.request" in verify
     assert "enrolled + online" in verify
-    assert "RKNODE_ENROLLMENT_COMPLETE" in verify
-    assert "must be true or false" in verify
+    assert "--enroll" in verify
     stop = (OFFLINE_ROOT / "common" / "stop.sh").read_text(encoding="utf-8")
-    assert "must be true or false" in stop
+    assert "read-manifest.py composeProject" in stop
     assert "${RKNODE_NODE_TOKEN}" not in verify
     assert "${RKNODE_CONVERTER_TOKEN}" not in verify
     assert "${RKNODE_INFERENCE_TOKEN}" not in verify
@@ -240,6 +240,10 @@ def test_bundle_packager_covers_the_two_release_delivery_archives() -> None:
     assert "shutil.rmtree(destination)" in packager
     assert '"requiresNetworkDuringDeploy": False' in packager
     assert '"secretsIncluded": False' in packager
+    assert '"healthKind": spec.health_kind' in packager
+    assert '"composeProject": spec.project' in packager
+    assert 'destination / "bundle.env"' not in packager
+    assert "env_example" not in packager
     assert '"--allow-cross-arch"' in packager
     assert "image_arch != spec.arch" in packager
     assert "strict=True" not in packager
@@ -258,9 +262,7 @@ def test_platform_bundle_contains_api_web_and_media_images() -> None:
         (OFFLINE_ROOT / "platform" / "compose.yaml").read_text(encoding="utf-8")
     )
     assert set(compose["services"]) == {"api", "frontend", "media"}
-    assert compose["services"]["frontend"]["ports"] == [
-        "${RKNODE_WEB_PORT:-5173}:80"
-    ]
+    assert compose["services"]["frontend"]["ports"] == ["5173:80"]
     assert compose["services"]["media"]["pull_policy"] == "never"
 
 
@@ -283,7 +285,7 @@ def test_every_offline_node_bundle_includes_the_enrollment_overlay() -> None:
 
     for name, spec in SPECS.items():
         if name != "platform-amd64":
-            assert spec.compose_files[-1] == "compose.enrollment.yaml"
+            assert "enrollment" in spec.compose_files[-1]
 
 
 def test_rk3588_delivery_uses_one_image_for_two_container_roles() -> None:

@@ -1,14 +1,11 @@
+# First start only. Keep the one-time credential in the fixed secret file below.
 services:
   trainer:
     environment:
-      RKNODE_NODE_TOKEN: ""
-      RKNODE_ENDPOINT_ID: ${RKNODE_ENDPOINT_ID:?set endpoint ID from the platform}
-      RKNODE_PLATFORM_URL: ${RKNODE_PLATFORM_URL:?set central platform URL}
       RKNODE_ENROLLMENT_TOKEN_FILE: /run/secrets/rknode-enrollment-token
-      RKNODE_NODE_TOKEN_FILE: /data/state/node-token
     secrets:
       - rknode-enrollment-token
 
 secrets:
   rknode-enrollment-token:
-    file: ${RKNODE_ENROLLMENT_TOKEN_PATH:?set enrollment token file path}
+    file: ./secrets/trainer-enrollment-token

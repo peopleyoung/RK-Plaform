@@ -1,102 +1,108 @@
-# RKNode 模型训练、转换与推理平台
+# RK3588 Platform
 
-RKNode 通过一个中央 Web/API 平台管理数据集、CPU/CUDA 训练、RK3588 模型转换、RK3588 推理部署和实时视频结果。当前版本统一采用“先在平台注册节点，再向节点下发一次性注册码”的接入方式；训练、转换和推理节点都通过同一套身份与健康探测流程上线。
+本项目提供中央平台、训练节点、RK3588 转换节点和 RK3588 推理节点。部署配置只使用 Compose YAML：所有运行环境变量都在对应 `compose.yaml` 的 `environment` 中，首次注册凭证使用 Compose `secrets` 挂载。仓库不再需要 `.env`、`bundle.env` 或 `docker compose --env-file`。
 
-## 文档入口
+## 1. 部署拓扑
 
-| 文档 | 适用人员 | 内容 |
-| --- | --- | --- |
-| [完整使用与部署手册](docs/system-guide.md) | 首次部署运维、平台管理员 | 架构、网络、平台部署、业务使用、升级、备份和故障处理 |
-| [节点部署手册](docs/simple-node-deployment.md) | 节点运维 | CPU/CUDA 训练节点、RK3588 转换/推理节点、注册码下发和稳态切换 |
-| [离线部署手册](docs/offline-deployment.md) | 隔离网运维 | 离线包制作、传输、校验、加载、部署和回滚 |
-| [第三方源码清单](third_party/SOURCES.md) | 构建与审计人员 | 固定版本的训练、RKNN、媒体依赖来源 |
+中央平台示例地址为 `172.16.66.249:5173`，API 在容器内监听 8000，Media 对外提供 RTSP `8554` 和 WS-FLV `8081`。节点服务统一监听节点宿主机地址映射的 10081/10082：训练节点示例 `172.16.66.249:10081`，板端转换/推理示例 `172.30.82.12:10081`、`172.30.82.12:10082`。历史 SSH 隧道示例为 `172.29.0.1:11081`、`172.29.0.1:11082`，仅用于临时联通性验证。
 
-首次部署请从[完整使用与部署手册](docs/system-guide.md)开始，不要直接复制历史命令或使用无标签镜像。
+节点的服务地址填写节点宿主机 IP 和端口；`RKNODE_PLATFORM_URL` 填中央平台地址，不是节点自身地址。平台创建 Endpoint 后取得 `RKNODE_ENDPOINT_ID` 和一次性注册码，注册码写入对应的 `./secrets/*-enrollment-token` 文件，权限设为 0600。
 
-## 当前发布版本
+基础 Compose 使用 `RKNODE_NODE_TOKEN_FILE` 保存注册后的长期凭证；首次启动 overlay 通过 `RKNODE_ENROLLMENT_TOKEN_FILE` 只读挂载一次性注册码。
 
-| 角色 | 最终镜像 | 架构 |
-| --- | --- | --- |
-| 平台 API | `rknode-platform-api:2026.08.20` | amd64 |
-| 平台 Web | `rknode-platform-web:2026.08.20` | amd64 |
-| 平台 Media | `rknode-platform-media:2026.08.20` | amd64 |
-| Torch CPU 训练 | `rknode-trainer-torch-cpu:2026.08.20` | amd64 |
-| Paddle CPU 训练 | `rknode-trainer-paddle-cpu:2026.08.20` | amd64 |
-| Torch CUDA 12.4 训练 | `rknode-trainer-torch-cuda12.4:2026.08.20` | amd64 |
-| Paddle CUDA 12.6 训练 | `rknode-trainer-paddle-cuda12.6:2026.08.20` | amd64 |
-| RK3588 转换/推理 | `rknode-rk3588-node:2026.08.20-business` | arm64 |
+## 2. 中央平台
 
-RK3588 使用一个统一镜像启动 converter 和 inference 两个独立容器。当前最终镜像约 2.23 GB；构建期间产生的 RKNN 工具链中间镜像不是交付镜像。
+在仓库根目录编辑 [deploy/compose.yaml](deploy/compose.yaml)：
 
-生产部署禁止使用 `latest`、`local` 和 `<none>` 镜像。镜像的 `org.opencontainers.image.version`、`org.opencontainers.image.revision` 与架构必须在部署前核对。
+- `admin-token` 是前端登录令牌，默认示例为 `admin`，生产环境应直接在 YAML 中改成随机长字符串。
+- `worker-token`、`zlm-api-secret`、`zlm-hook-identity` 也必须直接改在 YAML 中；不要提交真实值。
+- 修改 `172.16.66.249` 为中央服务器可被浏览器和节点访问的宿主机 IP。不能提供域名或证书时使用 `http://IP:5173`。
 
-## 当前已验证拓扑
+检查并启动：
 
-```text
-浏览器
-  -> http://172.16.66.249:5173
-       -> Web/Nginx -> API:8000（Compose 内部）
-       -> Media WS-FLV:8081
+~~~bash
+docker compose -f deploy/compose.yaml config --quiet
+docker compose -f deploy/compose.yaml up -d --no-build
+docker compose -f deploy/compose.yaml ps
+~~~
 
-训练节点
-  平台 -> 172.16.66.249:10081
+浏览器打开 `http://<中央服务器IP>:5173`，登录令牌就是 Compose 中 `admin-token` 的值。升级时使用 `up -d --no-build --force-recreate`，不要删除 `platform-data`、`media-data` 和 `media-logs` 卷。
 
-RK3588 板端
-  平台 -> 172.29.0.1:11081 -> SSH 隧道 -> 板端 127.0.0.1:10081（转换）
-  平台 -> 172.29.0.1:11082 -> SSH 隧道 -> 板端 127.0.0.1:10082（推理）
-  节点 -> http://172.16.66.249:5173（中央平台）
-```
+## 3. 节点注册
 
-`172.30.82.12:124` 当前是板端 SSH 管理入口，不等同于节点服务监听地址。中央服务器不能直接访问 `172.30.82.12:10081/10082` 时，平台必须继续使用 `172.29.0.1:11081/11082`。修通路由并完成真实业务验收后，才能改为板端宿主机 IP 加端口并停止隧道。
+在平台的节点管理页创建 Endpoint，记录 Endpoint ID、节点类型、加速器和一次性注册码。将 Endpoint ID 写入节点 Compose 的 `RKNODE_ENDPOINT_ID`，将中央平台写入 `RKNODE_PLATFORM_URL`。节点端口由 Compose 的 `ports` 决定，平台登记的服务地址应填写节点宿主机 IP 加端口，例如训练 `172.16.66.249:10081`，板端转换 `172.30.82.12:10081`、推理 `172.30.82.12:10082`。
 
-## 快速检查
+首次注册以训练节点为例：
 
-```bash
-# 中央平台
-curl -fsS http://127.0.0.1:5173/api/v1/ready
-docker compose --env-file deploy/.env -f deploy/compose.yaml ps
+~~~bash
+cd deploy/nodes/trainer
+mkdir -p secrets
+umask 077
+printf '%s' '<平台一次性注册码>' > secrets/trainer-enrollment-token
+chmod 600 secrets/trainer-enrollment-token
+docker compose -f compose.yaml -f compose.enrollment.yaml up -d --no-build
+~~~
 
-# 本机训练节点
-docker compose -p rknode-direct-cpu \
-  --env-file deploy/nodes/trainer/.env \
-  -f deploy/nodes/trainer/compose.yaml ps
+板端 RK3588：
 
-# RK3588 节点（在板端部署目录执行）
-docker compose -p rknode-rk3588 --env-file .env -f compose.yaml ps
-```
+~~~bash
+cd deploy/nodes/rk3588
+mkdir -p secrets output
+umask 077
+printf '%s' '<转换注册码>' > secrets/converter-enrollment-token
+printf '%s' '<推理注册码>' > secrets/inference-enrollment-token
+chmod 600 secrets/*-enrollment-token
+docker compose -p rknode-rk3588 -f compose.yaml -f compose.enrollment.yaml up -d --no-build
+~~~
 
-平台浏览器地址为 `http://<中央服务器IP>:5173`。首次打开时输入 `deploy/.env` 中的管理员令牌；令牌只保存在当前浏览器会话的 `sessionStorage` 中。
+平台状态依次为 `pending`、`claimed`、`enrolled`；两个 Endpoint 都显示 `enrolled` 且在线后，停止并移除 enrollment overlay，后续只使用基础 Compose：
 
-## 统一节点接入原则
+~~~bash
+docker compose -p rknode-rk3588 -f compose.yaml down
+docker compose -p rknode-rk3588 -f compose.yaml up -d --no-build
+~~~
 
-1. 平台“系统设置”中的服务地址，是中央平台访问节点的地址。
-2. 节点 `.env` 中的 `RKNODE_PLATFORM_URL`，是节点访问中央平台的地址，不附加 `/api/v1`。
-3. 平台生成一次性注册码；运维把它保存为权限 `0600` 的 secret 文件。
-4. 首次启动叠加 `compose.enrollment.yaml`，节点领取并持久化长期 Token。
-5. 平台状态达到 `enrolled + online` 后，使用基础 Compose 重建容器，解除一次性 secret 挂载。
-6. 确认重启仍在线后删除一次性注册码；长期 Token 保存在节点数据卷 `/data/state/node-token`。
+## 4. 训练运行时选择
 
-统一变量和地址索引：平台表单使用“节点宿主机 IP / 域名”及服务端口；节点使用 `RKNODE_ENDPOINT_ID`、`RKNODE_PLATFORM_URL`、`RKNODE_ENROLLMENT_TOKEN_FILE` 和 `RKNODE_NODE_TOKEN_FILE`。状态按 `pending -> claimed -> enrolled` 变化。当前训练节点为 `172.16.66.249:10081`，RK3588 转换和推理通过 `172.29.0.1:11081/11082` 接入；直连验收地址为 `172.30.82.12:10081` 和 `172.30.82.12:10082`。
+默认训练 Compose 使用 Torch CPU。需要其他运行时，叠加一个固定配置文件：
 
-注册码不是长期运行凭据，不要把管理员令牌、注册码、长期节点 Token、SSH 密码或私钥写入文档、URL、镜像、日志和工单。
+~~~bash
+docker compose -f deploy/nodes/trainer/compose.yaml \
+  -f deploy/nodes/trainer/compose.torch-cuda.yaml up -d --no-build
+~~~
 
-## 开发验证
+可选文件为 `compose.torch-cpu.yaml`、`compose.torch-cuda.yaml`、`compose.paddle-cpu.yaml`、`compose.paddle-cuda.yaml`。CUDA 主机必须安装 NVIDIA Container Toolkit；Paddle 版本和设备能力以对应 YAML 为准。
 
-```bash
-uv sync --all-groups
-npm ci
-.venv/bin/ruff check backend workers tests scripts
-.venv/bin/pyright backend workers
-.venv/bin/pytest -q
-npm run build
-npm run test:unit
-npm run test:ui
-```
+## 5. 运维命令
 
-实际生产部署、节点矩阵和离线交付步骤见上方三份运维手册。
+~~~bash
+docker compose -f deploy/compose.yaml logs -f --tail=200 api frontend media
+docker compose -f deploy/nodes/trainer/compose.yaml logs -f --tail=200 trainer
+docker compose -p rknode-rk3588 -f deploy/nodes/rk3588/compose.yaml logs -f --tail=200 converter inference
+docker compose -f deploy/compose.yaml down
+~~~
+
+节点不能直接暴露公网，优先使用同一内网或 VPN。没有证书时使用受控 IP:端口访问；临时 SSH 隧道只能由跳板机建立，禁止把 SSH 密码写入脚本或镜像，且不得保存 SSH 密码。
+
+## 6. 离线部署
+
+使用 `scripts/package_offline_bundle.py` 生成归档。归档包含固定版本镜像、`manifest.json`、Compose 文件和脚本，不包含 `.env` 或注册码。目标机解包后直接编辑 Compose 中的 `replace-with-*` 和 `CENTRAL_SERVER_IP`，再运行：
+
+~~~bash
+./load-images.sh
+./configure-media-secrets.py --compose-file compose.yaml   # 仅平台包
+./deploy.sh --enroll
+./verify.sh --enroll
+~~~
+
+待注册完成后再运行 `./deploy.sh` 和 `./verify.sh`。离线包默认拒绝拉取和构建，镜像必须已通过 `load-images.sh` 导入。
 
 ## 旧版静态 Token 迁移
 
-旧节点可在维护窗口使用静态 Token 过渡，但新节点必须使用平台注册、一次性注册码和长期 Token 文件的统一 enrollment 流程。迁移步骤见[节点部署手册](docs/simple-node-deployment.md)。
+旧部署如果仍保留静态 Token，应先在平台为节点生成一次性注册码。将注册码写入固定 secret 文件，使用 enrollment overlay 启动一次；确认 `enrolled` 后移除 overlay，再清空 Compose 中旧的静态 Token 并重建容器。旧 Token 不得继续复制到日志、镜像或公网主机。
 
-安全边界：节点控制端口不得暴露到公网；跨网段优先使用 VPN，必要时使用 HTTPS 或 SSH 隧道。平台和文档不得保存 SSH 密码。
+## 安全边界
+
+节点宿主机 IP / 域名必须能访问中央平台，但服务端口不得暴露到公网。生产环境建议 VPN；无证书环境至少限制防火墙来源。平台与节点之间可使用 HTTPS 反向代理，临时 SSH 隧道必须设置 `BatchMode=yes`、密钥权限 0600、自动过期，并不得保存 SSH 密码。
+
+更多步骤见 [docs/system-guide.md](docs/system-guide.md)、[docs/simple-node-deployment.md](docs/simple-node-deployment.md) 和 [docs/offline-deployment.md](docs/offline-deployment.md)。
