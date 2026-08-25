@@ -117,24 +117,24 @@ docker compose -p rknode-rk3588 -f deploy/nodes/rk3588/compose.yaml logs -f --ta
 
 端口只开放给内网或 VPN，服务不得暴露到公网。无证书部署使用受控 IP:端口；有条件时使用 HTTPS 反向代理。当前现网通过中央主机 SSH 隧道 `172.29.0.1:11081` 和 `172.29.0.1:11082` 探活；直连端口恢复后应切换 Endpoint。隧道只作为应急连接方式维护，跳板机应使用密钥、BatchMode=yes 和自动过期，不得保存 SSH 密码。
 
-## 7. 推理媒体算子和动态链路
+## 7. 推理图编排
 
 推理容器当前注册 10 类可选算子：
 
-| 类别 | 算子 | 作用 |
-| --- | --- | --- |
-| 输入 | `VideoCaptureNode` | OpenCV 兼容输入 |
-| 输入 | `RkMppCaptureNode` | RTSP H.264/H.265 的 Rockchip MPP 硬解码，并保留原始编码包 |
-| 推理 | `InferNode` | 主 RKNN 模型推理 |
-| 跟踪 | `ByteTrackNode` | YOLO 检测结果跟踪 |
-| 推理 | `SecondaryInferNode` | 对主检测结果指定类别执行二级 YOLO 推理 |
-| 分析 | `AnalyticsNode` | 区域进入/离开和越线规则 |
-| 事件 | `EventOutputNode` | JPEG 抓拍和原码流录像 |
-| 输出 | `JsonOutputNode` | JSONL 或 HTTP 结构化结果 |
-| 输出 | `KafkaOutputNode` | 异步 Kafka 结果输出 |
-| 输出 | `ZlmSeiOutputNode` | 将 schema-v2 结果写入原始 RTSP 码流的 SEI |
+| 类别 | 业务算子 ID | 运行时算子 | 作用 |
+| --- | --- | --- | --- |
+| 输入 | `capture.opencv` | `VideoCaptureNode` | OpenCV 兼容输入 |
+| 输入 | `capture.rkmpp` | `RkMppCaptureNode` | RTSP H.264/H.265 的 MPP 硬解码，并保留原始编码包 |
+| 推理 | `inference.primary` | `InferNode` | 主 RKNN 模型推理 |
+| 跟踪 | `processing.bytetrack` | `ByteTrackNode` | YOLO 检测结果跟踪 |
+| 推理 | `inference.secondary` | `SecondaryInferNode` | 对指定类别执行二级 YOLO 推理 |
+| 分析 | `processing.analytics` | `AnalyticsNode` | 区域进入/离开和越线规则 |
+| 事件 | `processing.events` | `EventOutputNode` | JPEG 抓拍和原码流录像 |
+| 输出 | `output.json` | `JsonOutputNode` | JSONL 或 HTTP 结构化结果 |
+| 输出 | `output.kafka` | `KafkaOutputNode` | 异步 Kafka 结果输出 |
+| 输出 | `output.zlm_sei` | `ZlmSeiOutputNode` | 将 schema-v2 结果写入原始 RTSP 码流的 SEI |
 
-这些是镜像支持的算子，不代表每个任务都会实例化全部节点。每次任务创建、编辑或重启时，平台根据 `media` 和 `analytics` 生成不可变 revision。典型动态链路为：
+这些是镜像支持的算子，不代表每个任务都会实例化全部节点。Web 端从 `GET /api/v1/inference-operator-catalog` 读取目录和默认参数，并调用 `POST /api/v1/inference-graphs/validate` 校验。创建任务保存为草稿；编辑时提交 `baseRevisionId` 做乐观并发控制。只有图语义改变才生成新的不可变 revision，画布坐标不参与语义哈希。典型链路为：
 
 ~~~text
 Capture -> Infer -> [ByteTrack] -> [SecondaryInfer 0..N]
@@ -149,12 +149,16 @@ Capture -> Infer -> [ByteTrack] -> [SecondaryInfer 0..N]
 
 配置约束：
 
-- `decoder=rkmpp` 只接受 RTSP 输入；ZLM SEI 和事件录像必须使用 RKMPP。
+- 图必须恰好包含一个 Capture、一个主推理和至少一个输出；每个运行时节点只允许一个上游，二级推理形成单链。
+- `capture.rkmpp` 只接受 RTSP 输入；ZLM SEI 和事件录像必须使用 RKMPP。
 - ByteTrack 只适用于 YOLO 检测模型；区域/越线规则必须同时启用 ByteTrack。
 - 二级推理只能引用已发布的 YOLO 检测版本，最多四个独立版本。
 - `AnalyticsNode` 同时处理区域和越线；`EventOutputNode` 同时处理抓拍和录像。
 - Kafka/ZLM sink 失败不会改变本地推理任务健康状态，失败分支会重试或丢弃，不阻塞 NPU 主链。
-- 空 `media` 和 `analytics` 保留旧版 OpenCV + JSON 兼容链路。
+- 选择 `output.zlm_sei` 时在算子参数中直接选择在线媒体网关并填写流名称；平台只在 Agent desired state 中注入带短期凭证的 `publishUri`。
+- 板端 YOLO 只接受 `yolo_dfl_split_v1` / `YOLO_DFL_SPLIT`。训练目录可以保留其他导出变体，但旧 V5/平坦 ByteTrack 输出不能登记为可部署推理版本。
+
+任务列表约每 3 秒自动刷新，部署详情约每 2 秒刷新；不需要手动刷新页面。保存任务不会重启当前运行实例，操作员需要选择任务创建部署批次。部署目标固定任务当时的 `graphRevisionId`、图快照和语义哈希，回滚也使用目标保存的上一份图快照。
 
 检查当前任务实际链路时，以板端 `/data/runtime/revisions/<revision>/pipelines/` 中的任务图为准，而不是只看节点能力列表。节点健康检查和版本核对：
 
@@ -165,6 +169,25 @@ docker compose -p rknode-rk3588 -f compose.yaml logs --tail=200 inference
 ~~~
 
 当前在线发布线为 API/Web `2026.08.25`、Media `2026.08.24`、RK3588 转换/推理 `2026.08.25-business`；训练角色仍为 `2026.08.24`。离线包尚未切换到这条在线发布线，使用前必须核对包内 `VERSION` 与镜像清单。
+
+### 旧推理任务迁移
+
+新 API 不兼容旧任务请求和旧数据库任务。先停止推理 Agent，再做只读预览：
+
+~~~bash
+python scripts/migrate_inference_graph_v1.py --database /path/to/platform.db
+~~~
+
+确认统计后，指定一个不存在的备份文件执行清理：
+
+~~~bash
+python scripts/migrate_inference_graph_v1.py \
+  --database /path/to/platform.db \
+  --backup /path/to/platform.before-graph-v1.db \
+  --execute
+~~~
+
+脚本先用 SQLite 在线备份 API 生成完整备份，再清除旧推理任务、图修订和部署历史，并递增受影响节点的 desired revision。脚本不会自动执行，不支持内存数据库或 PostgreSQL。需要恢复时先停止 API，把当前数据库移走，再用备份文件恢复原路径；旧服务只能读取旧数据库，新服务要求重新编排任务。
 
 ## 旧版静态 Token 迁移
 

@@ -320,6 +320,36 @@ body.modal-open { overflow: hidden; }
 .modal-header p { margin: 4px 0 0; color: var(--muted); font-size: 10px; line-height: 16px; }
 .modal-content { min-height: 0; padding: 18px 20px 20px; overflow-y: auto; }
 .modal-footer { min-height: 64px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--line); background: #fafbfb; border-radius: 0 0 8px 8px; }
+.graph-editor { display: grid; grid-template-columns: 190px minmax(0, 1fr) 250px; min-height: 430px; border: 1px solid var(--line); background: #fff; }
+.graph-palette, .graph-inspector { min-width: 0; padding: 12px; background: #fafbfb; overflow: auto; }
+.graph-palette { border-right: 1px solid var(--line); }
+.graph-inspector { border-left: 1px solid var(--line); }
+.graph-palette section + section { margin-top: 14px; }
+.graph-palette h4 { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; }
+.graph-palette-item { width: 100%; min-height: 46px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 8px; border: 0; border-top: 1px solid var(--line); background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.graph-palette-item:hover:not(:disabled) { background: #fff; }
+.graph-palette-item:disabled { opacity: .48; cursor: default; }
+.graph-palette-item span, .graph-inspector header div { min-width: 0; display: flex; flex-direction: column; }
+.graph-palette-item strong, .graph-inspector strong { font-size: 11px; }
+.graph-palette-item small, .graph-inspector small { overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.graph-workspace { min-width: 0; display: flex; flex-direction: column; background: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px); background-size: 24px 24px; }
+.graph-canvas { position: relative; min-height: 390px; flex: 1; overflow: auto; }
+.graph-edge-layer { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
+.graph-edge-layer path { fill: none; stroke: var(--green); stroke-width: 1.5; }
+.graph-node { position: absolute; z-index: 1; width: 142px; min-height: 62px; display: flex; flex-direction: column; justify-content: center; padding: 9px 10px 9px 34px; border: 1px solid #9aaba5; border-radius: 6px; background: #fff; box-shadow: 0 2px 8px rgba(16, 24, 40, .08); cursor: pointer; }
+.graph-node.selected { border-color: var(--green); box-shadow: 0 0 0 2px rgba(30, 126, 95, .16); }
+.graph-node strong { font-size: 11px; }
+.graph-node small { margin-top: 3px; overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.graph-node-index { position: absolute; left: 9px; top: 10px; width: 17px; height: 17px; display: grid; place-items: center; border-radius: 50%; background: #edf2f0; color: var(--muted); font-size: 9px; }
+.graph-validation { min-height: 38px; display: flex; align-items: center; gap: 7px; padding: 8px 12px; border-top: 1px solid var(--line); background: #fff; color: var(--danger); font-size: 10px; }
+.graph-validation.valid { color: var(--green); }
+.graph-inspector header { min-height: 44px; display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--line); }
+.graph-config-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding-top: 12px; }
+.graph-config-fields .field span { overflow-wrap: anywhere; }
+.graph-config-fields textarea { width: 100%; resize: vertical; font-family: var(--mono); font-size: 9px; }
+.graph-config-fields .field.invalid textarea { border-color: var(--danger); box-shadow: 0 0 0 2px rgba(190, 58, 48, .1); }
+.graph-boolean-field { min-height: 34px; display: flex; align-items: center; gap: 8px; font-size: 10px; }
+.graph-mobile-steps { display: none; }
 .inference-stream-player { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .inference-stream-surface { position: relative; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; border: 1px solid #26312d; border-radius: 6px; background: #101513; }
 .inference-stream-surface video, .inference-stream-surface canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; object-fit: contain; }
@@ -657,6 +687,13 @@ body.modal-open { overflow: hidden; }
 }
 
 @media (max-width: 820px) {
+  .graph-editor { grid-template-columns: 150px minmax(0, 1fr); }
+  .graph-inspector { grid-column: 1 / -1; border-top: 1px solid var(--line); border-left: 0; }
+  .graph-canvas { display: none; }
+  .graph-mobile-steps { min-height: 260px; display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 12px; list-style: none; }
+  .graph-mobile-steps button { width: 100%; min-height: 42px; display: flex; align-items: center; gap: 9px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 4px; background: #fff; color: inherit; text-align: left; }
+  .graph-mobile-steps button.selected { border-color: var(--green); }
+  .graph-mobile-steps button span { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; background: #edf2f0; font-size: 9px; }
   .app-shell { display: block; }
   .sidebar { display: none; }
   .main-area { grid-column: auto; }
@@ -692,6 +729,11 @@ body.modal-open { overflow: hidden; }
 }
 
 @media (max-width: 560px) {
+  .graph-editor { grid-template-columns: 1fr; }
+  .graph-palette { border-right: 0; border-bottom: 1px solid var(--line); }
+  .graph-palette section { display: grid; grid-template-columns: 1fr 1fr; }
+  .graph-palette h4 { grid-column: 1 / -1; }
+  .graph-config-fields { grid-template-columns: 1fr; }
   .topbar { padding: 0 10px; }
   .page-content { padding: 16px 12px 28px; }
   .page-stack { gap: 14px; }

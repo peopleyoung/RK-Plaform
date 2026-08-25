@@ -71,18 +71,6 @@ uint32_t tensor_width(const rknn_tensor_attr& attr) {
     return attr.fmt == RKNN_TENSOR_NHWC ? attr.dims[2] : attr.dims[3];
 }
 
-size_t detection_feature_count(const rknn_tensor_attr& attr) {
-    if (attr.n_dims < 2) {
-        return 0;
-    }
-    const size_t trailing = attr.dims[attr.n_dims - 1];
-    if (trailing >= 6 && trailing <= 512) {
-        return trailing;
-    }
-    const size_t preceding = attr.dims[attr.n_dims - 2];
-    return preceding >= 6 && preceding <= 512 ? preceding : 0;
-}
-
 float intersection_over_union(const infer::RknnYoloInstance::Candidate& lhs,
                               const infer::RknnYoloInstance::Candidate& rhs) {
     const float left         = std::max(lhs.left, rhs.left);
@@ -117,10 +105,9 @@ bool RknnYoloInstance::init(YAML::Node config) {
     if (!parse_rknn_core_config(config, core_mask_, core_mask_name_, core_policy_, getName())) {
         return false;
     }
-    if (model_type_ != "V5" && model_type_ != "ByteTrack" && model_type_ != "YOLO_DFL_SPLIT") {
-        LOG_ERROR(
-            "RKNN instance {} does not support model type {}; supported types are V5, ByteTrack and YOLO_DFL_SPLIT",
-            getName(), model_type_);
+    if (model_type_ != "YOLO_DFL_SPLIT") {
+        LOG_ERROR("RKNN instance {} only supports model type YOLO_DFL_SPLIT; got {}", getName(),
+                  model_type_);
         return false;
     }
     if (config["confidence_threshold"]) {
@@ -280,55 +267,33 @@ bool RknnYoloInstance::query_tensors(rknn_context context) {
         return false;
     }
     split_output_pairs_.clear();
-    if (model_type_ == "YOLO_DFL_SPLIT") {
-        if (output_attrs_.size() < 2) {
-            LOG_ERROR("RKNN model {} requires DFL box/class outputs; got {} tensors", model_path_,
-                      output_attrs_.size());
-            return false;
+    if (output_attrs_.size() < 2) {
+        LOG_ERROR("RKNN model {} requires DFL box/class outputs; got {} tensors", model_path_,
+                  output_attrs_.size());
+        return false;
+    }
+    std::vector<bool> used_class_outputs(output_attrs_.size(), false);
+    for (size_t box_index = 0; box_index < output_attrs_.size(); ++box_index) {
+        const auto& box = output_attrs_[box_index];
+        if (box.n_dims != 4 || tensor_channels(box) < 8 || tensor_channels(box) % 4 != 0) {
+            continue;
         }
-        std::vector<bool> used_class_outputs(output_attrs_.size(), false);
-        for (size_t box_index = 0; box_index < output_attrs_.size(); ++box_index) {
-            const auto& box = output_attrs_[box_index];
-            if (box.n_dims != 4 || tensor_channels(box) < 8 || tensor_channels(box) % 4 != 0) {
+        const uint32_t grid_h = tensor_height(box);
+        const uint32_t grid_w = tensor_width(box);
+        for (size_t class_index = 0; class_index < output_attrs_.size(); ++class_index) {
+            const auto& classes = output_attrs_[class_index];
+            if (class_index == box_index || used_class_outputs[class_index] || classes.n_dims != 4 ||
+                tensor_channels(classes) != labels_.size() || tensor_height(classes) != grid_h ||
+                tensor_width(classes) != grid_w) {
                 continue;
             }
-            const uint32_t grid_h = tensor_height(box);
-            const uint32_t grid_w = tensor_width(box);
-            for (size_t class_index = 0; class_index < output_attrs_.size(); ++class_index) {
-                const auto& classes = output_attrs_[class_index];
-                if (class_index == box_index || used_class_outputs[class_index] || classes.n_dims != 4
-                    || tensor_channels(classes) != labels_.size() || tensor_height(classes) != grid_h
-                    || tensor_width(classes) != grid_w) {
-                    continue;
-                }
-                split_output_pairs_.emplace_back(box_index, class_index);
-                used_class_outputs[class_index] = true;
-                break;
-            }
+            split_output_pairs_.emplace_back(box_index, class_index);
+            used_class_outputs[class_index] = true;
+            break;
         }
-        if (split_output_pairs_.empty()) {
-            LOG_ERROR("RKNN model {} has no compatible DFL box/class output pairs", model_path_);
-            return false;
-        }
-        return true;
     }
-
-    if (output_attrs_.size() != 1) {
-        LOG_ERROR("RKNN model {} exposes {} outputs. This adapter expects a decoded flat YOLO output; use "
-                  "YOLO_DFL_SPLIT for platform split-head models",
-                  model_path_, output_attrs_.size());
-        return false;
-    }
-    const size_t feature_count = detection_feature_count(output_attrs_.front());
-    if (feature_count == 0) {
-        LOG_ERROR("RKNN model {} has unsupported decoded YOLO output {}", model_path_,
-                  tensor_shape(output_attrs_.front()));
-        return false;
-    }
-    const size_t class_count = feature_count - 5;
-    if (labels_.size() != class_count) {
-        LOG_ERROR("RKNN instance {} has {} labels but output requires {} classes", getName(), labels_.size(),
-                  class_count);
+    if (split_output_pairs_.empty()) {
+        LOG_ERROR("RKNN model {} has no compatible DFL box/class output pairs", model_path_);
         return false;
     }
     return true;
@@ -444,93 +409,13 @@ bool RknnYoloInstance::process(Job& job, rknn_context context) {
     }
 
     auto targets = std::make_shared<object_meta::FrameTargetList>();
-    bool decoded = false;
-    if (model_type_ == "YOLO_DFL_SPLIT") {
-        decoded = decode_dfl_split_output(outputs, transform, source.cols, source.rows, targets);
-    } else {
-        const size_t output_elements = tensor_element_count(output_attrs_[0]);
-        if (output_elements == 0 || (outputs[0].size != 0 && outputs[0].size < output_elements * sizeof(float))) {
-            LOG_ERROR("RKNN output buffer for {} is invalid: elements={}, bytes={}", getName(), output_elements,
-                      outputs[0].size);
-            rknn_outputs_release(context, static_cast<uint32_t>(outputs.size()), outputs.data());
-            return false;
-        }
-        decoded = decode_flat_output(static_cast<const float*>(outputs[0].buf), output_attrs_[0], transform,
-                                     source.cols, source.rows, targets);
-    }
+    const bool decoded = decode_dfl_split_output(outputs, transform, source.cols, source.rows, targets);
     rknn_outputs_release(context, static_cast<uint32_t>(outputs.size()), outputs.data());
     if (!decoded) {
         return false;
     }
     job.data->set_frame_target_list(getName(), targets);
     return true;
-}
-
-bool RknnYoloInstance::decode_flat_output(const float* output, const rknn_tensor_attr& attr,
-                                          const LetterboxTransform& transform, int source_width, int source_height,
-                                          object_meta::FrameTargetList::ptr& targets) {
-    if (!output || attr.n_dims < 2) {
-        LOG_ERROR("RKNN output is not a flat detection tensor: {}", tensor_shape(attr));
-        return false;
-    }
-
-    const size_t feature_count = detection_feature_count(attr);
-    const bool   transposed    = feature_count != attr.dims[attr.n_dims - 1];
-    const size_t element_count = tensor_element_count(attr);
-    if (feature_count < 6 || feature_count > 512 || element_count == 0 || element_count % feature_count != 0) {
-        LOG_ERROR("Unsupported decoded YOLO output shape {} (elements={})", tensor_shape(attr), element_count);
-        return false;
-    }
-    const size_t box_count   = element_count / feature_count;
-    const size_t class_count = feature_count - 5;
-    if (class_count == 0) {
-        return false;
-    }
-    auto value = [&](size_t row, size_t column) {
-        return transposed ? output[column * box_count + row] : output[row * feature_count + column];
-    };
-    std::vector<Candidate> candidates;
-    candidates.reserve(std::min<size_t>(box_count, 1024));
-    for (size_t row = 0; row < box_count; ++row) {
-        const float objectness = value(row, 4);
-        if (!std::isfinite(objectness) || objectness < confidence_threshold_) {
-            continue;
-        }
-        int   class_id    = 0;
-        float class_score = value(row, 5);
-        for (size_t class_index = 1; class_index < class_count; ++class_index) {
-            const float score = value(row, class_index + 5);
-            if (score > class_score) {
-                class_score = score;
-                class_id    = static_cast<int>(class_index);
-            }
-        }
-        const float confidence = objectness * class_score;
-        if (!std::isfinite(confidence) || confidence < confidence_threshold_) {
-            continue;
-        }
-        const float center_x = value(row, 0);
-        const float center_y = value(row, 1);
-        const float width    = value(row, 2);
-        const float height   = value(row, 3);
-        Candidate   candidate{
-            (center_x - width * 0.5f - transform.pad_x) / transform.scale,
-            (center_y - height * 0.5f - transform.pad_y) / transform.scale,
-            (center_x + width * 0.5f - transform.pad_x) / transform.scale,
-            (center_y + height * 0.5f - transform.pad_y) / transform.scale,
-            confidence,
-            class_id,
-        };
-        candidate.left   = std::clamp(candidate.left, 0.0f, static_cast<float>(source_width - 1));
-        candidate.top    = std::clamp(candidate.top, 0.0f, static_cast<float>(source_height - 1));
-        candidate.right  = std::clamp(candidate.right, 0.0f, static_cast<float>(source_width - 1));
-        candidate.bottom = std::clamp(candidate.bottom, 0.0f, static_cast<float>(source_height - 1));
-        if (candidate.right > candidate.left && candidate.bottom > candidate.top) {
-            candidates.push_back(candidate);
-        }
-    }
-
-    return emit_candidates(candidates, targets);
 }
 
 bool RknnYoloInstance::decode_dfl_split_output(const std::vector<rknn_output>& outputs,

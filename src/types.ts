@@ -274,21 +274,85 @@ export interface InferenceSummary {
   activeDeployments: number
 }
 
+export interface InferenceGraphNode {
+  id: string
+  operator: string
+  config: Record<string, unknown>
+}
+
+export interface InferenceGraphEdge {
+  source: string
+  sourcePort: string
+  target: string
+  targetPort: string
+}
+
+export interface InferenceGraph {
+  schemaVersion: number
+  catalogVersion: string
+  nodes: InferenceGraphNode[]
+  edges: InferenceGraphEdge[]
+}
+
+export interface InferenceGraphLayout {
+  positions: Record<string, { x: number; y: number }>
+}
+
+export interface InferenceOperator {
+  operatorId: string
+  runtimeNode: string
+  category: 'capture' | 'inference' | 'processing' | 'output'
+  title: string
+  description: string
+  inputPorts: string[]
+  outputPorts: string[]
+  minInstances: number
+  maxInstances: number
+  defaults: Record<string, unknown>
+  dependencies: string[]
+  supportedAdapters: string[]
+  requiredFeatures: string[]
+  configurableFields: string[]
+  readOnlyFields: string[]
+}
+
+export interface InferenceOperatorCatalog {
+  schemaVersion: number
+  catalogVersion: string
+  operators: InferenceOperator[]
+}
+
+export interface InferenceGraphValidationIssue {
+  code: string
+  message: string
+  path: string
+  severity: string
+  details: Record<string, unknown>
+}
+
+export interface InferenceGraphValidation {
+  valid: boolean
+  normalizedGraph: InferenceGraph | null
+  graphHash: string | null
+  issues: InferenceGraphValidationIssue[]
+  releaseIds: string[]
+  requiredFeatures: string[]
+  requiredAdapters: string[]
+  requiredContexts: number
+  compatibleNodeIds: string[]
+}
+
 export interface InferenceTask {
   id: string
   name: string
   status: InferenceTaskStatus
-  releaseId: string
   nodeId: string
   groupId: string | null
   inputUri: string
-  interval: number
-  thresholds: Record<string, number>
-  output: Record<string, unknown>
-  media: Record<string, unknown>
-  analytics: Record<string, unknown>
-  contextCount: number
-  workerCount: number
+  graph: InferenceGraph
+  layout: InferenceGraphLayout
+  graphRevisionId: string
+  graphHash: string
   npuCoreMask: NpuCoreMask
   npuCorePolicy: NpuCorePolicy
   previewCapability: PreviewCapability
@@ -363,8 +427,8 @@ export interface DeploymentTarget {
   deploymentId: string
   nodeId: string
   taskId: string
-  releaseId: string
-  previousReleaseId: string | null
+  graphRevisionId: string
+  graphHash: string
   sequence: number
   desiredRevision: number
   state: DeploymentTargetState
@@ -381,7 +445,6 @@ export interface Deployment {
   id: string
   name: string
   status: DeploymentStatus
-  releaseId: string
   strategy: string
   batchSize: number
   targets: DeploymentTarget[]

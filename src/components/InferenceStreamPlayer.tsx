@@ -3,6 +3,7 @@ import { LoaderCircle, Radio, RefreshCw, VideoOff } from 'lucide-react'
 
 import { normalizeInferenceAnalytics } from './InferenceBusinessFields'
 import { StatusBadge } from '../components'
+import { taskAnalytics } from '../inferenceGraph'
 import { useInferenceStreamPlayer, type InferencePlayerState } from '../media/useInferenceStreamPlayer'
 import type { InferenceTask, StatusTone } from '../types'
 
@@ -35,7 +36,7 @@ export function InferenceStreamPlayer({ task, compact = false }: {
   task: InferenceTask
   compact?: boolean
 }) {
-  const analytics = useMemo(() => normalizeInferenceAnalytics(task.analytics), [task.analytics])
+  const analytics = useMemo(() => normalizeInferenceAnalytics(taskAnalytics(task)), [task])
   const options = useMemo(() => ({
     taskId: task.id,
     revision: task.configRevision,

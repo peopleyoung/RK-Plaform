@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
+import { mkdir } from 'node:fs/promises'
 import { chromium } from 'playwright'
 
 const baseUrl = process.env.PROTOTYPE_URL ?? 'http://127.0.0.1:5173'
+const screenshotDir = process.env.SMOKE_SCREENSHOT_DIR
+if (screenshotDir) await mkdir(screenshotDir, { recursive: true })
 const browser = await chromium.launch({ headless: true })
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
 page.addInitScript(() => sessionStorage.setItem('rknode.adminToken', 'admin'))
@@ -67,6 +70,45 @@ const smokeMediaGateway = {
   apiSecretConfigured: true, hookIdentityConfigured: true, lastProbeAt: fixtureTime,
   lastHookAt: fixtureTime, lastError: null, createdAt: fixtureTime, updatedAt: fixtureTime,
 }
+const graphOperator = (operatorId, runtimeNode, category, title, defaults, configurableFields, options = {}) => ({
+  operatorId, runtimeNode, category, title, description: title,
+  inputPorts: category === 'capture' ? [] : ['frame'], outputPorts: category === 'output' ? [] : ['frame'],
+  minInstances: options.minInstances ?? 0, maxInstances: options.maxInstances ?? 1,
+  defaults, dependencies: options.dependencies ?? [], supportedAdapters: options.supportedAdapters ?? [],
+  requiredFeatures: options.requiredFeatures ?? [], configurableFields, readOnlyFields: [],
+})
+const smokeOperatorCatalog = {
+  schemaVersion: 1,
+  catalogVersion: '2026.08.25',
+  operators: [
+    graphOperator('capture.opencv', 'VideoCaptureNode', 'capture', '通用解码', { loop: true, reconnectMs: 1000 }, ['loop', 'reconnectMs'], { minInstances: 1 }),
+    graphOperator('capture.rkmpp', 'RkMppCaptureNode', 'capture', 'MPP 硬解码', { loop: true, reconnectMs: 1000 }, ['loop', 'reconnectMs'], { minInstances: 1, requiredFeatures: ['rkmpp_decode'] }),
+    graphOperator('inference.primary', 'InferNode', 'inference', '主推理', { releaseId: '', interval: 1, confidence: 0.4, nms: 0.5, contextCount: 1, workerCount: 1 }, ['releaseId', 'interval', 'confidence', 'nms', 'contextCount', 'workerCount'], { minInstances: 1, supportedAdapters: ['yolo_dfl_split_v1', 'deeplab_logits_v1', 'ppocr_db_det_v1', 'ppocr_ctc_rec_v1'] }),
+    graphOperator('processing.bytetrack', 'ByteTrackNode', 'processing', 'ByteTrack', { trackBuffer: 30 }, ['trackBuffer'], { dependencies: ['inference.primary'], supportedAdapters: ['yolo_dfl_split_v1'], requiredFeatures: ['bytetrack'] }),
+    graphOperator('inference.secondary', 'SecondaryInferNode', 'inference', '二级推理', { releaseId: '', confidence: 0.25, sourceClassIds: [], contextCount: 1, workerCount: 1 }, ['releaseId', 'confidence', 'sourceClassIds', 'contextCount', 'workerCount'], { maxInstances: 4, dependencies: ['inference.primary', 'processing.bytetrack'], supportedAdapters: ['yolo_dfl_split_v1'], requiredFeatures: ['secondary_infer'] }),
+    graphOperator('processing.analytics', 'AnalyticsNode', 'processing', '区域/越线分析', { areas: [], lines: [], osd: { enabled: true, showLabels: true, showConfidence: true, showTrackId: true, showAreas: true, showLines: true } }, ['areas', 'lines', 'osd'], { dependencies: ['processing.bytetrack'], supportedAdapters: ['yolo_dfl_split_v1'], requiredFeatures: ['analytics_area', 'analytics_line'] }),
+    graphOperator('processing.events', 'EventOutputNode', 'processing', '事件抓拍/录像', { enabled: true, snapshot: true, record: false, preSeconds: 3, postSeconds: 5, retentionDays: 30 }, ['enabled', 'snapshot', 'record', 'preSeconds', 'postSeconds', 'retentionDays'], { dependencies: ['processing.analytics'], requiredFeatures: ['event_snapshot', 'event_record'] }),
+    graphOperator('output.json', 'JsonOutputNode', 'output', 'JSONL/HTTP 输出', { type: 'jsonl', url: '', authorizationEnv: '', connectTimeoutMs: 1000, requestTimeoutMs: 3000 }, ['type', 'url', 'authorizationEnv', 'connectTimeoutMs', 'requestTimeoutMs']),
+    graphOperator('output.kafka', 'KafkaOutputNode', 'output', 'Kafka 输出', { brokers: '', topic: 'sei_msg', key: '', queueMessages: 10000, messageTimeoutMs: 3000 }, ['brokers', 'topic', 'key', 'queueMessages', 'messageTimeoutMs'], { requiredFeatures: ['kafka'] }),
+    graphOperator('output.zlm_sei', 'ZlmSeiOutputNode', 'output', 'ZLM SEI 输出', { gatewayId: '', streamName: '', reconnectMs: 1000 }, ['gatewayId', 'streamName', 'reconnectMs'], { dependencies: ['capture.rkmpp'], requiredFeatures: ['zlm_sei'] }),
+  ],
+}
+const inferenceGraph = (releaseId, { zlm = true, streamName = 'ui-restart' } = {}) => {
+  const nodes = [
+    { id: 'capture', operator: zlm ? 'capture.rkmpp' : 'capture.opencv', config: { loop: true, reconnectMs: 1000 } },
+    { id: 'primary', operator: 'inference.primary', config: { releaseId, interval: 1, confidence: 0.4, nms: 0.5, contextCount: 1, workerCount: 1 } },
+    { id: 'json-output', operator: 'output.json', config: { type: 'jsonl', url: '', authorizationEnv: '', connectTimeoutMs: 1000, requestTimeoutMs: 3000 } },
+  ]
+  if (zlm) nodes.push({ id: 'zlm-output', operator: 'output.zlm_sei', config: { gatewayId: smokeMediaGateway.id, streamName, reconnectMs: 1000 } })
+  return {
+    schemaVersion: 1, catalogVersion: '2026.08.25', nodes,
+    edges: [
+      { source: 'capture', sourcePort: 'frame', target: 'primary', targetPort: 'frame' },
+      { source: 'primary', sourcePort: 'frame', target: 'json-output', targetPort: 'frame' },
+      ...(zlm ? [{ source: 'primary', sourcePort: 'frame', target: 'zlm-output', targetPort: 'frame' }] : []),
+    ],
+  }
+}
 const smokeTrainingEvents = [
   { id: 91001, type: 'log', level: 'info', message: 'Loading training dataset', data: { stage: 'train' }, createdAt: fixtureTime },
   { id: 91002, type: 'metric', level: 'info', message: 'epoch=1/2 train_loss=0.72 val_loss=0.65', data: { stage: 'train', epoch: 1, totalEpochs: 2, metrics: { train_loss: 0.72, val_loss: 0.65 } }, createdAt: fixtureTime },
@@ -78,31 +120,21 @@ const smokeConversionEvents = [
   { id: 92003, type: 'progress', level: 'info', message: 'Uploading RKNN artifact', data: { stage: 'upload_rknn', progress: 92, metrics: {} }, createdAt: fixtureTime },
 ]
 const smokeInferenceTask = {
-  id: 'itask_ui_stopped', name: '界面停止推理任务', status: 'stopped', releaseId: 'release_ui_fixture', nodeId: 'inode_ui_fixture', groupId: null,
-  inputUri: 'rtsp://camera/ui-restart', interval: 0, thresholds: {}, output: { type: 'jsonl' }, npuCoreMask: 'auto', npuCorePolicy: 'shared', configRevision: 1,
-  previewCapability: { state: 'available', reason: null }, media: { decoder: 'rkmpp', zlmSei: { enabled: true, gatewayId: 'gateway_builtin', streamName: 'ui-restart' } }, analytics: {},
+  id: 'itask_ui_stopped', name: '界面停止推理任务', status: 'stopped', nodeId: 'inode_ui_fixture', groupId: null,
+  inputUri: 'rtsp://camera/ui-restart', graph: inferenceGraph(smokeYoloRelease.id), layout: { positions: {} }, graphRevisionId: 'graphrev_ui_stopped', graphHash: 'a'.repeat(64),
+  npuCoreMask: 'auto', npuCorePolicy: 'shared', configRevision: 1, previewCapability: { state: 'available', reason: null },
   errorMessage: null, createdAt: fixtureTime, updatedAt: fixtureTime,
 }
 const smokeRunningInferenceTask = {
   ...smokeInferenceTask,
   id: 'itask_ui_running', name: '界面实时预览任务', status: 'running', inputUri: 'rtsp://camera/ui-preview', configRevision: 2,
 }
-const smokeCreatedInferenceTask = {
+let smokeCreatedInferenceTask = {
   ...smokeInferenceTask,
-  id: 'itask_ui_created', name: '界面自动启动任务', status: 'stopped', releaseId: smokeYoloRelease.id, configRevision: 0,
-}
-const smokeCreatedStartedInferenceTask = {
-  ...smokeCreatedInferenceTask,
-  status: 'deploying', configRevision: 3,
+  id: 'itask_ui_created', name: '界面图编排草稿', status: 'draft', graph: inferenceGraph(smokeYoloRelease.id, { streamName: 'ui-created-stream' }), graphRevisionId: 'graphrev_ui_created', configRevision: 0,
 }
 const smokeRestartDeployment = {
-  id: 'deployment_ui_restart', name: `Restart ${smokeInferenceTask.name}`, status: 'rolling', releaseId: smokeInferenceTask.releaseId,
-  strategy: 'all_at_once', batchSize: 1, createdAt: fixtureTime, updatedAt: fixtureTime, completedAt: null,
-  targets: [{
-    id: 'dtarget_ui_restart', deploymentId: 'deployment_ui_restart', nodeId: smokeInferenceTask.nodeId, taskId: smokeInferenceTask.id,
-    releaseId: smokeInferenceTask.releaseId, previousReleaseId: smokeInferenceTask.releaseId, sequence: 0, desiredRevision: 2,
-    state: 'pending', progress: 0, stage: 'queued', errorCode: null, errorMessage: null, startedAt: null, completedAt: null, updatedAt: fixtureTime,
-  }],
+  ...smokeInferenceTask, status: 'deploying', configRevision: 2,
 }
 const smokeRetiredInferenceNode = {
   id: 'inode_ui_retired', name: '界面退役测试板卡', groupId: null, labels: ['ui-fixture'], lifecycle: 'retired',
@@ -110,12 +142,17 @@ const smokeRetiredInferenceNode = {
   runtimeVersion: 'rknn-runtime-2.3.2', driverVersion: 'fixture', pipelineVersion: 'fixture', adapters: ['deeplab_logits_v1'], metadata: {},
   desiredRevision: 0, actualRevision: 0, selfTestPassed: false, lastSeenAt: fixtureTime, createdAt: fixtureTime, updatedAt: fixtureTime,
 }
+const smokeActiveInferenceNode = {
+  ...smokeRetiredInferenceNode,
+  id: 'inode_ui_fixture', name: '界面健康测试板卡', lifecycle: 'active', connectivity: 'online', health: 'healthy', selfTestPassed: true,
+  adapters: ['yolo_dfl_split_v1'], metadata: { features: ['rkmpp_decode', 'bytetrack', 'kafka', 'zlm_sei', 'analytics_area', 'analytics_line', 'event_snapshot', 'event_record', 'secondary_infer'] },
+}
 const smokeCompletedDeployment = {
-  id: 'deployment_ui_completed', name: '界面已完成部署批次', status: 'succeeded', releaseId: smokeInferenceTask.releaseId,
+  id: 'deployment_ui_completed', name: '界面已完成部署批次', status: 'succeeded',
   strategy: 'all_at_once', batchSize: 1, createdAt: fixtureTime, updatedAt: fixtureTime, completedAt: fixtureTime,
   targets: [{
     id: 'dtarget_ui_completed', deploymentId: 'deployment_ui_completed', nodeId: smokeRetiredInferenceNode.id, taskId: smokeInferenceTask.id,
-    releaseId: smokeInferenceTask.releaseId, previousReleaseId: null, sequence: 0, desiredRevision: 1,
+    graphRevisionId: smokeInferenceTask.graphRevisionId, graphHash: smokeInferenceTask.graphHash, sequence: 0, desiredRevision: 1,
     state: 'healthy', progress: 100, stage: 'healthy', errorCode: null, errorMessage: null, startedAt: fixtureTime, completedAt: fixtureTime, updatedAt: fixtureTime,
   }],
 }
@@ -123,7 +160,6 @@ let smokeInferenceRestarted = false
 let smokeInferenceRestartCalls = 0
 let smokeCreatedInference = false
 let smokeCreatedInferenceCalls = 0
-let smokeCreatedInferenceStartCalls = 0
 let smokeCreatedInferenceFirstPageReadAt = 0
 let smokeCreatedInferencePayload = null
 let smokePlaybackSessionCalls = 0
@@ -218,22 +254,28 @@ await page.route('**/api/v1/model-releases**', async (route) => {
     await route.continue()
     return
   }
-  const response = await route.fetch()
-  const payload = await response.json()
-  if (Array.isArray(payload.items) && Number(url.searchParams.get('page') ?? 1) === 1) {
-    for (const release of [smokeYoloRelease, smokeSecondaryRelease]) {
-      if (!payload.items.some((item) => item.id === release.id)) payload.items.push(release)
-    }
-    payload.total += 2
-  }
-  await route.fulfill({ response, json: payload })
+  const pageNumber = Number(url.searchParams.get('page') ?? 1)
+  const pageSize = Number(url.searchParams.get('pageSize') ?? 20)
+  const items = pageNumber === 1 ? [smokeYoloRelease, smokeSecondaryRelease] : []
+  await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items, page: pageNumber, pageSize, total: 2 }) })
 })
 await page.route('**/api/v1/media-gateways', async (route) => {
-  const response = await route.fetch()
-  const payload = await response.json()
-  if (!Array.isArray(payload)) throw new Error('media gateway fixture expects an array')
-  if (!payload.some((item) => item.id === smokeMediaGateway.id)) payload.push(smokeMediaGateway)
-  await route.fulfill({ response, json: payload })
+  await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([smokeMediaGateway]) })
+})
+await page.route('**/api/v1/inference-operator-catalog', async (route) => {
+  await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(smokeOperatorCatalog) })
+})
+await page.route('**/api/v1/inference-graphs/validate', async (route) => {
+  const payload = JSON.parse(route.request().postData() ?? '{}')
+  const graph = payload.graph
+  const primary = graph.nodes.find((node) => node.operator === 'inference.primary')
+  const requiredFeatures = graph.nodes.flatMap((node) => smokeOperatorCatalog.operators.find((operator) => operator.operatorId === node.operator)?.requiredFeatures ?? [])
+  const requiredContexts = graph.nodes.filter((node) => ['inference.primary', 'inference.secondary'].includes(node.operator)).reduce((total, node) => total + Number(node.config.contextCount ?? 1), 0)
+  await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+    valid: true, normalizedGraph: graph, graphHash: 'f'.repeat(64), issues: [],
+    releaseIds: primary?.config.releaseId ? [primary.config.releaseId] : [], requiredFeatures,
+    requiredAdapters: ['yolo_dfl_split_v1'], requiredContexts, compatibleNodeIds: [smokeActiveInferenceNode.id],
+  }) })
 })
 await page.route('**/api/v1/inference-tasks**', async (route) => {
   const request = route.request()
@@ -242,12 +284,17 @@ await page.route('**/api/v1/inference-tasks**', async (route) => {
     smokeCreatedInference = true
     smokeCreatedInferenceCalls += 1
     smokeCreatedInferencePayload = JSON.parse(request.postData() ?? '{}')
+    smokeCreatedInferenceTask = {
+      ...smokeCreatedInferenceTask,
+      name: smokeCreatedInferencePayload.name,
+      nodeId: smokeCreatedInferencePayload.nodeId,
+      inputUri: smokeCreatedInferencePayload.inputUri,
+      graph: smokeCreatedInferencePayload.graph,
+      layout: smokeCreatedInferencePayload.layout,
+      npuCoreMask: smokeCreatedInferencePayload.npuCoreMask,
+      npuCorePolicy: smokeCreatedInferencePayload.npuCorePolicy,
+    }
     await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify(smokeCreatedInferenceTask) })
-    return
-  }
-  if (request.method() === 'POST' && url.pathname.endsWith(`/${smokeCreatedInferenceTask.id}/restart`)) {
-    smokeCreatedInferenceStartCalls += 1
-    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(smokeCreatedStartedInferenceTask) })
     return
   }
   if (request.method() === 'POST' && url.pathname.endsWith(`/${smokeInferenceTask.id}/restart`)) {
@@ -269,22 +316,20 @@ await page.route('**/api/v1/inference-tasks**', async (route) => {
     })
     return
   }
-  const response = await route.fetch()
-  const payload = await response.json()
-  if (Array.isArray(payload.items) && Number(url.searchParams.get('page') ?? 1) === 1) {
+  if (request.method() === 'GET' && url.pathname === '/api/v1/inference-tasks') {
+    const pageNumber = Number(url.searchParams.get('page') ?? 1)
+    const pageSize = Number(url.searchParams.get('pageSize') ?? 20)
+    const items = []
     const fixture = { ...smokeInferenceTask, status: smokeInferenceRestarted ? 'deploying' : 'stopped' }
-    if (!payload.items.some((item) => item.id === fixture.id)) payload.items.push(fixture)
-    if (!payload.items.some((item) => item.id === smokeRunningInferenceTask.id)) payload.items.push(smokeRunningInferenceTask)
-    if (smokeCreatedInference && !payload.items.some((item) => item.id === smokeCreatedInferenceTask.id)) {
+    if (pageNumber === 1) items.push(fixture, smokeRunningInferenceTask)
+    if (pageNumber === 1 && smokeCreatedInference) {
       if (url.searchParams.get('pageSize') === '10' && !smokeCreatedInferenceFirstPageReadAt) smokeCreatedInferenceFirstPageReadAt = Date.now()
-      const createdTask = smokeCreatedInferenceStartCalls
-        ? { ...smokeCreatedStartedInferenceTask, status: smokeCreatedInferenceFirstPageReadAt && Date.now() - smokeCreatedInferenceFirstPageReadAt >= 500 ? 'running' : 'deploying' }
-        : smokeCreatedInferenceTask
-      payload.items.push(createdTask)
+      items.push(smokeCreatedInferenceTask)
     }
-    payload.total += smokeCreatedInference ? 3 : 2
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items, page: pageNumber, pageSize, total: smokeCreatedInference ? 3 : 2 }) })
+    return
   }
-  await route.fulfill({ response, json: payload })
+  await route.continue()
 })
 await page.route('**/api/v1/inference-nodes**', async (route) => {
   const request = route.request()
@@ -299,13 +344,10 @@ await page.route('**/api/v1/inference-nodes**', async (route) => {
     await route.continue()
     return
   }
-  const response = await route.fetch()
-  const payload = await response.json()
-  if (Array.isArray(payload.items) && Number(url.searchParams.get('page') ?? 1) === 1 && !smokeRetiredNodeDeleted) {
-    if (!payload.items.some((item) => item.id === smokeRetiredInferenceNode.id)) payload.items.push(smokeRetiredInferenceNode)
-    payload.total += 1
-  }
-  await route.fulfill({ response, json: payload })
+  const pageNumber = Number(url.searchParams.get('page') ?? 1)
+  const pageSize = Number(url.searchParams.get('pageSize') ?? 20)
+  const items = pageNumber === 1 ? [smokeActiveInferenceNode, ...(!smokeRetiredNodeDeleted ? [smokeRetiredInferenceNode] : [])] : []
+  await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items, page: pageNumber, pageSize, total: smokeRetiredNodeDeleted ? 1 : 2 }) })
 })
 await page.route('**/api/v1/deployments**', async (route) => {
   const request = route.request()
@@ -320,9 +362,10 @@ await page.route('**/api/v1/deployments**', async (route) => {
     await route.continue()
     return
   }
-  const response = await route.fetch()
-  const payload = await response.json()
-  if (Array.isArray(payload.items) && Number(url.searchParams.get('page') ?? 1) === 1 && !smokeCompletedDeploymentDeleted) {
+  const pageNumber = Number(url.searchParams.get('page') ?? 1)
+  const pageSize = Number(url.searchParams.get('pageSize') ?? 20)
+  const items = []
+  if (pageNumber === 1 && !smokeCompletedDeploymentDeleted) {
     if (url.searchParams.get('pageSize') === '10' && !smokeDeploymentFirstPageReadAt) smokeDeploymentFirstPageReadAt = Date.now()
     const completed = Boolean(smokeDeploymentFirstPageReadAt && Date.now() - smokeDeploymentFirstPageReadAt >= 500)
     const deploymentFixture = {
@@ -337,10 +380,9 @@ await page.route('**/api/v1/deployments**', async (route) => {
         completedAt: completed ? fixtureTime : null,
       })),
     }
-    if (!payload.items.some((item) => item.id === deploymentFixture.id)) payload.items.push(deploymentFixture)
-    payload.total += 1
+    items.push(deploymentFixture)
   }
-  await route.fulfill({ response, json: payload })
+  await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items, page: pageNumber, pageSize, total: smokeCompletedDeploymentDeleted ? 0 : 1 }) })
 })
 const routes = {
   overview: '工作台',
@@ -388,6 +430,7 @@ await page.getByRole('tab', { name: '推理任务' }).click()
 await page.getByRole('button', { name: '新建推理任务' }).click()
 const inferenceTaskDialog = page.getByRole('dialog')
 await inferenceTaskDialog.getByRole('heading', { name: '新建推理任务' }).waitFor()
+await inferenceTaskDialog.locator('.graph-node').filter({ hasText: '主推理' }).click()
 await inferenceTaskDialog.getByLabel(/模型版本/).selectOption(smokeYoloRelease.id)
 assert.equal(await inferenceTaskDialog.getByRole('alert').count(), 0)
 assert.equal(await inferenceTaskDialog.getByLabel('使用核心').inputValue(), 'auto')
@@ -398,35 +441,36 @@ await inferenceTaskDialog.getByLabel('使用核心').selectOption('core1')
 assert.equal(await inferenceTaskDialog.getByLabel('使用核心').inputValue(), 'core1')
 await inferenceTaskDialog.getByLabel('核心策略').selectOption('shared')
 await inferenceTaskDialog.getByLabel('使用核心').selectOption('auto')
+await inferenceTaskDialog.locator('.graph-node').filter({ hasText: 'JSONL/HTTP 输出' }).click()
 await inferenceTaskDialog.getByLabel('输出方式').selectOption('http')
-await inferenceTaskDialog.getByLabel(/业务接口 URL/).fill('https://consumer.example/results')
-await inferenceTaskDialog.getByLabel('Bearer 令牌环境变量').fill('RKNODE_RESULT_SINK_TOKEN')
-const inferenceTimeouts = inferenceTaskDialog.locator('.inline-fields input')
-assert.deepEqual(await inferenceTimeouts.evaluateAll((inputs) => inputs.map((input) => input.value)), ['1000', '3000'])
+await inferenceTaskDialog.getByLabel('url').fill('https://consumer.example/results')
+await inferenceTaskDialog.getByLabel('authorizationEnv').fill('RKNODE_RESULT_SINK_TOKEN')
+assert.equal(await inferenceTaskDialog.getByLabel('connectTimeoutMs').inputValue(), '1000')
+assert.equal(await inferenceTaskDialog.getByLabel('requestTimeoutMs').inputValue(), '3000')
 await inferenceTaskDialog.getByLabel('输出方式').selectOption('jsonl')
-assert.equal(await inferenceTaskDialog.getByLabel(/业务接口 URL/).count(), 0)
-const rtspSeiToggle = inferenceTaskDialog.getByRole('checkbox', { name: /RTSP \+ SEI 实时预览/ })
-await rtspSeiToggle.check()
-assert.equal(await inferenceTaskDialog.getByLabel('解码方式').inputValue(), 'rkmpp')
-assert.equal(await inferenceTaskDialog.getByLabel('解码方式').isDisabled(), true)
-await inferenceTaskDialog.getByLabel(/^媒体网关/).selectOption(smokeMediaGateway.id)
-await inferenceTaskDialog.getByLabel(/发布流名称/).fill('ui-created-stream')
+await inferenceTaskDialog.getByRole('button', { name: /MPP 硬解码/ }).click()
+await inferenceTaskDialog.getByRole('button', { name: /ZLM SEI 输出/ }).click()
+await inferenceTaskDialog.getByLabel('媒体网关').selectOption(smokeMediaGateway.id)
+await inferenceTaskDialog.getByLabel('streamName').fill('ui-created-stream')
 await inferenceTaskDialog.getByLabel('任务名称').fill(smokeCreatedInferenceTask.name)
-await inferenceTaskDialog.getByRole('button', { name: '创建任务' }).click()
+if (screenshotDir) await inferenceTaskDialog.screenshot({ path: `${screenshotDir}/inference-graph-desktop.png` })
+await inferenceTaskDialog.getByRole('button', { name: '保存草稿' }).click()
 await inferenceTaskDialog.waitFor({ state: 'detached' })
 assert.equal(smokeCreatedInferenceCalls, 1, 'creating an inference task should call the create endpoint once')
-assert.equal(smokeCreatedInferenceStartCalls, 1, 'creating an inference task should start it immediately')
-assert.deepEqual(smokeCreatedInferencePayload?.media?.zlmSei, {
-  enabled: true,
+assert.equal(smokeCreatedInferencePayload?.releaseId, undefined, 'new graph tasks must not submit top-level releaseId')
+assert.equal(smokeCreatedInferencePayload?.media, undefined, 'new graph tasks must not submit top-level media')
+const createdCapture = smokeCreatedInferencePayload?.graph?.nodes?.find((node) => node.operator === 'capture.rkmpp')
+const createdZlm = smokeCreatedInferencePayload?.graph?.nodes?.find((node) => node.operator === 'output.zlm_sei')
+assert.ok(createdCapture, `graph should contain RKMPP capture: ${JSON.stringify(smokeCreatedInferencePayload?.graph)}`)
+assert.deepEqual(createdZlm?.config, {
   gatewayId: smokeMediaGateway.id,
   streamName: 'ui-created-stream',
   reconnectMs: 1000,
 })
-assert.equal(smokeCreatedInferencePayload?.media?.decoder, 'rkmpp')
+assert.deepEqual(smokeCreatedInferencePayload?.layout && Object.keys(smokeCreatedInferencePayload.layout), ['positions'])
 const createdInferenceRow = page.locator('tbody tr').filter({ hasText: smokeCreatedInferenceTask.name })
-await createdInferenceRow.getByText('部署中', { exact: true }).waitFor()
-assert.equal(await createdInferenceRow.getByRole('button', { name: '重启' }).count(), 0, 'newly created task should not show restart')
-await createdInferenceRow.getByText('运行中', { exact: true }).waitFor({ timeout: 7000 })
+await createdInferenceRow.getByText('草稿', { exact: true }).waitFor()
+assert.equal(await createdInferenceRow.getByRole('button', { name: '重启' }).count(), 0, 'draft task should require an explicit deployment')
 const runningInferenceRow = page.locator('tbody tr').filter({ hasText: smokeRunningInferenceTask.name })
 await runningInferenceRow.getByRole('button', { name: `查看实时预览 ${smokeRunningInferenceTask.name}` }).click()
 const previewDialog = page.getByRole('dialog')
@@ -567,6 +611,15 @@ if (await conversionDelete.count()) {
 }
 
 await page.setViewportSize({ width: 390, height: 844 })
+if (screenshotDir) {
+  await page.goto(`${baseUrl}/#/inference`)
+  await page.getByRole('tab', { name: '推理任务' }).click()
+  await page.getByRole('button', { name: '新建推理任务' }).click()
+  const mobileGraphDialog = page.getByRole('dialog')
+  await mobileGraphDialog.getByRole('heading', { name: '新建推理任务' }).waitFor()
+  await mobileGraphDialog.screenshot({ path: `${screenshotDir}/inference-graph-mobile.png` })
+  await mobileGraphDialog.getByRole('button', { name: '取消' }).click()
+}
 await page.goto(`${baseUrl}/#/conversion`)
 const mobile = await page.evaluate(() => ({ body: document.body.scrollWidth, viewport: window.innerWidth }))
 assert.ok(mobile.body <= mobile.viewport, `mobile page overflows: ${JSON.stringify(mobile)}`)

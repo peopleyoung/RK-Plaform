@@ -35,18 +35,36 @@ def task_payload(
 ) -> dict[str, object]:
     return {
         "name": "line-a-media",
-        "releaseId": release_id,
         "nodeId": node_id,
         "inputUri": "rtsp://camera/line-a",
-        "media": {
-            "decoder": "rkmpp",
-            "zlmSei": {
-                "enabled": True,
-                "gatewayId": gateway_id,
-                "streamName": "camera_01",
-                "reconnectMs": 1000,
-            },
+        "graph": {
+            "schemaVersion": 1,
+            "catalogVersion": "2026.08.25",
+            "nodes": [
+                {"id": "capture", "operator": "capture.rkmpp", "config": {}},
+                {
+                    "id": "primary",
+                    "operator": "inference.primary",
+                    "config": {"releaseId": release_id},
+                },
+                {"id": "json", "operator": "output.json", "config": {}},
+                {
+                    "id": "zlm",
+                    "operator": "output.zlm_sei",
+                    "config": {
+                        "gatewayId": gateway_id,
+                        "streamName": "camera_01",
+                        "reconnectMs": 1000,
+                    },
+                },
+            ],
+            "edges": [
+                {"source": "capture", "target": "primary"},
+                {"source": "primary", "target": "json"},
+                {"source": "primary", "target": "zlm"},
+            ],
         },
+        "layout": {"positions": {}},
     }
 
 
@@ -67,7 +85,8 @@ def test_task_gateway_binding_generates_separate_node_and_browser_credentials(
     )
     assert created.status_code == 201, created.text
     task = created.json()
-    assert task["media"] == payload["media"]
+    zlm_node = next(node for node in task["graph"]["nodes"] if node["operator"] == "output.zlm_sei")
+    assert zlm_node["config"]["gatewayId"] == gateway["id"]
     assert task["previewCapability"] == {"state": "available", "reason": None}
 
     deployment = client.post(
@@ -75,7 +94,6 @@ def test_task_gateway_binding_generates_separate_node_and_browser_credentials(
         headers=ADMIN_HEADERS,
         json={
             "name": "line-a-media-rollout",
-            "releaseId": release["id"],
             "taskIds": [task["id"]],
             "strategy": "all_at_once",
         },
@@ -87,7 +105,7 @@ def test_task_gateway_binding_generates_separate_node_and_browser_credentials(
         headers={"Authorization": f"Bearer {access_token}"},
     )
     assert desired.status_code == 200, desired.text
-    desired_media = desired.json()["tasks"][0]["media"]
+    desired_media = desired.json()["tasks"][0]["runtimeBindings"]["media"]
     zlm = desired_media["zlmSei"]
     assert set(zlm) == {"enabled", "publishUri", "reconnectMs"}
     publish_uri = urlparse(zlm["publishUri"])
@@ -171,8 +189,9 @@ def test_task_rejects_legacy_output_uri_and_offline_gateway(client: TestClient) 
     )
     gateway = create_online_gateway(client)
     base = task_payload(release["id"], node_id, gateway["id"])
-    legacy = cast(dict[str, Any], base["media"])["zlmSei"]
-    assert isinstance(legacy, dict)
+    graph = cast(dict[str, Any], base["graph"])
+    nodes = cast(list[dict[str, Any]], graph["nodes"])
+    legacy = next(node["config"] for node in nodes if node["operator"] == "output.zlm_sei")
     legacy.pop("gatewayId")
     legacy.pop("streamName")
     legacy["outputUri"] = "rtsp://legacy/live/result?token=must-not-leak"
@@ -180,7 +199,8 @@ def test_task_rejects_legacy_output_uri_and_offline_gateway(client: TestClient) 
     rejected = client.post(
         "/api/v1/inference-tasks", headers=ADMIN_HEADERS, json=base
     )
-    assert rejected.status_code == 422
+    assert rejected.status_code == 409
+    assert rejected.json()["error"]["code"] == "inference_graph_invalid"
     assert "must-not-leak" not in rejected.text
 
     context = cast(AppContext, client.app.state.context)

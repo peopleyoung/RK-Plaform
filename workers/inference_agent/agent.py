@@ -24,6 +24,44 @@ TARGET_STAGES = (
     ("warming", 94),
     ("healthy", 100),
 )
+GRAPH_CATALOG_VERSION = "2026.08.25"
+
+
+def _graph_release_ids(task: dict[str, Any]) -> tuple[str, list[str]]:
+    graph_value = task.get("graph")
+    if not isinstance(graph_value, dict):
+        raise ValueError("Inference task is missing graph contract")
+    graph = cast(dict[str, Any], graph_value)
+    if graph.get("schemaVersion") != 1 or graph.get("catalogVersion") != GRAPH_CATALOG_VERSION:
+        raise ValueError("Inference task graph contract version is unsupported")
+    if not isinstance(task.get("graphRevisionId"), str) or not isinstance(
+        task.get("graphHash"), str
+    ):
+        raise ValueError("Inference task is missing graph revision identity")
+    nodes_value = graph.get("nodes")
+    if not isinstance(nodes_value, list):
+        raise ValueError("Inference task graph nodes must be an array")
+    primary_ids: list[str] = []
+    secondary_ids: list[str] = []
+    for value in cast(list[object], nodes_value):
+        if not isinstance(value, dict):
+            raise ValueError("Inference task graph node must be an object")
+        node = cast(dict[str, Any], value)
+        operator = node.get("operator")
+        if operator not in {"inference.primary", "inference.secondary"}:
+            continue
+        config_value = node.get("config")
+        config = cast(dict[str, Any], config_value) if isinstance(config_value, dict) else {}
+        release_id = config.get("releaseId")
+        if not isinstance(release_id, str) or not release_id:
+            raise ValueError(f"Graph node {node.get('id')} is missing releaseId")
+        if operator == "inference.primary":
+            primary_ids.append(release_id)
+        else:
+            secondary_ids.append(release_id)
+    if len(primary_ids) != 1:
+        raise ValueError("Inference task graph requires exactly one primary release")
+    return primary_ids[0], secondary_ids
 
 
 @dataclass(frozen=True)
@@ -89,9 +127,7 @@ class AgentSettings:
             command_timeout_seconds=max(
                 1.0, float(os.environ.get("RKNODE_RUNTIME_TIMEOUT_SECONDS", "120"))
             ),
-            runtime_state_dir=Path(
-                os.environ.get("RKNODE_RUNTIME_STATE_DIR", "/data/runtime")
-            ),
+            runtime_state_dir=Path(os.environ.get("RKNODE_RUNTIME_STATE_DIR", "/data/runtime")),
         )
 
 
@@ -255,20 +291,26 @@ class InferenceAgent:
                 releases[str(typed_item["id"])] = typed_item
         raw_tasks_value = desired.get("tasks", [])
         raw_tasks = cast(list[Any], raw_tasks_value) if isinstance(raw_tasks_value, list) else []
-        tasks_by_release: dict[
-            str, list[tuple[str | None, dict[str, Any], dict[str, Any]]]
-        ] = {}
+        tasks_by_release: dict[str, list[tuple[str | None, dict[str, Any], dict[str, Any]]]] = {}
         reference_tasks_by_release: dict[str, list[tuple[str | None, dict[str, Any]]]] = {}
         for raw_task in raw_tasks:
             if not isinstance(raw_task, dict):
                 continue
             raw_task = cast(dict[str, Any], raw_task)
             target_id = raw_task.get("deploymentTargetId")
-            release_id = raw_task.get("releaseId")
             if target_id is not None and not isinstance(target_id, str):
                 failed = True
                 continue
-            if not isinstance(release_id, str):
+            try:
+                release_id, secondary_release_ids = _graph_release_ids(raw_task)
+            except ValueError as error:
+                if target_id is not None:
+                    self._report_failure(
+                        target_id,
+                        revision=int(desired["revision"]),
+                        code="graph_contract_invalid",
+                        message=str(error),
+                    )
                 failed = True
                 continue
             release = releases.get(release_id)
@@ -284,25 +326,7 @@ class InferenceAgent:
                 continue
             tasks_by_release.setdefault(release_id, []).append((target_id, raw_task, release))
             reference_tasks_by_release.setdefault(release_id, []).append((target_id, raw_task))
-            analytics_value = raw_task.get("analytics", {})
-            analytics = (
-                cast(dict[str, Any], analytics_value)
-                if isinstance(analytics_value, dict)
-                else {}
-            )
-            secondary_value = analytics.get("secondaryModels", [])
-            secondary_models = (
-                cast(list[Any], secondary_value) if isinstance(secondary_value, list) else []
-            )
-            for secondary in secondary_models:
-                if not isinstance(secondary, dict):
-                    failed = True
-                    continue
-                secondary_config = cast(dict[str, object], secondary)
-                secondary_release_id = secondary_config.get("releaseId")
-                if not isinstance(secondary_release_id, str):
-                    failed = True
-                    continue
+            for secondary_release_id in secondary_release_ids:
                 if secondary_release_id not in releases:
                     if target_id is not None:
                         self._report_failure(
@@ -452,16 +476,18 @@ class InferenceAgent:
         manifest_path: Path,
         tasks: list[dict[str, Any]],
     ) -> dict[str, str]:
+        release_config = {
+            "releaseId": str(release["id"]),
+            "name": release.get("name", ""),
+            "version": release.get("version", ""),
+            "adapter": release.get("adapter", ""),
+            "modelPath": str(model_path),
+            "manifestPath": str(manifest_path),
+            "tasks": tasks,
+        }
         return {
             **os.environ,
-            "RKNODE_TASK_ID": str(task["id"]),
-            "RKNODE_RELEASE_ID": str(release["id"]),
-            "RKNODE_MODEL_PATH": str(model_path),
-            "RKNODE_MANIFEST_PATH": str(manifest_path),
-            "RKNODE_ADAPTER": str(release.get("adapter", "")),
-            "RKNODE_INPUT_URI": str(task.get("inputUri", "")),
-            "RKNODE_TASK_CONFIG": json.dumps(task, separators=(",", ":")),
-            "RKNODE_TASK_CONFIGS": json.dumps(tasks, separators=(",", ":")),
+            "RKNODE_RELEASE_CONFIGS": json.dumps([release_config], separators=(",", ":")),
         }
 
     def _run_self_test(self) -> bool:
@@ -515,14 +541,7 @@ class InferenceAgent:
         else:
             environment = {
                 **os.environ,
-                "RKNODE_TASK_ID": "",
-                "RKNODE_RELEASE_ID": "",
-                "RKNODE_MODEL_PATH": "",
-                "RKNODE_MANIFEST_PATH": "",
-                "RKNODE_ADAPTER": "",
-                "RKNODE_INPUT_URI": "",
-                "RKNODE_TASK_CONFIG": "{}",
-                "RKNODE_TASK_CONFIGS": "[]",
+                "RKNODE_RELEASE_CONFIGS": "[]",
             }
         environment["RKNODE_DESIRED_REVISION"] = str(revision)
         environment["RKNODE_RELEASE_CONFIGS"] = json.dumps(

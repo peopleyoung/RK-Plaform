@@ -9,6 +9,50 @@ from workers.inference_agent.agent import AgentSettings, InferenceAgent
 from workers.inference_agent.client import InferenceAgentClient
 
 
+def _graph_task(
+    task_id: str,
+    release_id: str,
+    target_id: str | None,
+    input_uri: str = "rtsp://camera",
+) -> dict[str, object]:
+    return {
+        "id": task_id,
+        "deploymentTargetId": target_id,
+        "inputUri": input_uri,
+        "graphRevisionId": f"graphrev-{task_id}",
+        "graphHash": "a" * 64,
+        "runtimeBindings": {"media": {}},
+        "graph": {
+            "schemaVersion": 1,
+            "catalogVersion": "2026.08.25",
+            "nodes": [
+                {"id": "capture", "operator": "capture.opencv", "config": {}},
+                {
+                    "id": "primary",
+                    "operator": "inference.primary",
+                    "config": {
+                        "releaseId": release_id,
+                        "interval": 1,
+                        "confidence": 0.4,
+                        "nms": 0.5,
+                        "contextCount": 1,
+                        "workerCount": 1,
+                    },
+                },
+                {
+                    "id": "output",
+                    "operator": "output.json",
+                    "config": {"type": "jsonl"},
+                },
+            ],
+            "edges": [
+                {"source": "capture", "target": "primary"},
+                {"source": "primary", "target": "output"},
+            ],
+        },
+    }
+
+
 class FakeClient(InferenceAgentClient):
     def __init__(self, source: bytes) -> None:
         super().__init__("http://platform.test/api/v1", access_token="token")
@@ -69,14 +113,7 @@ def test_agent_downloads_verifies_and_reports_all_deployment_stages(tmp_path: Pa
                 "manifest": {"outputContract": "semantic_logits_nchw_v1"},
             }
         ],
-        "tasks": [
-            {
-                "id": "task_test",
-                "deploymentTargetId": "target_test",
-                "releaseId": "release_test",
-                "inputUri": "rtsp://camera",
-            }
-        ],
+        "tasks": [_graph_task("task_test", "release_test", "target_test")],
     }
     agent.reconcile_once()
     assert client.states == [
@@ -131,14 +168,7 @@ def test_agent_applies_task_revision_without_deployment_target(tmp_path: Path) -
                 "manifest": {"outputContract": "semantic_logits_nchw_v1"},
             }
         ],
-        "tasks": [
-            {
-                "id": "task_test",
-                "deploymentTargetId": None,
-                "releaseId": "release_test",
-                "inputUri": "rtsp://camera",
-            }
-        ],
+        "tasks": [_graph_task("task_test", "release_test", None)],
     }
 
     agent.reconcile_once()
@@ -170,13 +200,7 @@ def test_agent_keeps_actual_revision_when_activation_fails(tmp_path: Path) -> No
     client.desired_payload = {
         "revision": 4,
         "releases": [],
-        "tasks": [
-            {
-                "id": "task_test",
-                "deploymentTargetId": "target_test",
-                "releaseId": "release_missing",
-            }
-        ],
+        "tasks": [_graph_task("task_test", "release_missing", "target_test")],
     }
 
     agent.reconcile_once()
@@ -233,18 +257,8 @@ def test_agent_activates_one_runtime_context_for_shared_release(
             }
         ],
         "tasks": [
-            {
-                "id": "task_a",
-                "deploymentTargetId": "target_a",
-                "releaseId": "release_shared",
-                "inputUri": "rtsp://camera/a",
-            },
-            {
-                "id": "task_b",
-                "deploymentTargetId": "target_b",
-                "releaseId": "release_shared",
-                "inputUri": "rtsp://camera/b",
-            },
+            _graph_task("task_a", "release_shared", "target_a", "rtsp://camera/a"),
+            _graph_task("task_b", "release_shared", "target_b", "rtsp://camera/b"),
         ],
     }
     calls: list[dict[str, str]] = []
@@ -253,8 +267,8 @@ def test_agent_activates_one_runtime_context_for_shared_release(
         calls.append(
             {
                 "command": command[0],
-                "taskConfigs": env.get("RKNODE_TASK_CONFIGS", ""),
                 "releaseConfigs": env.get("RKNODE_RELEASE_CONFIGS", ""),
+                "legacyTaskConfigs": env.get("RKNODE_TASK_CONFIGS", ""),
             }
         )
         return SimpleNamespace(returncode=0)
@@ -269,11 +283,12 @@ def test_agent_activates_one_runtime_context_for_shared_release(
         "runtime-adapter",
         "runtime-health",
     ]
-    assert [item["id"] for item in json.loads(calls[2]["taskConfigs"])] == [
+    release_configs = json.loads(calls[2]["releaseConfigs"])
+    assert [item["id"] for item in release_configs[0]["tasks"]] == [
         "task_a",
         "task_b",
     ]
-    release_configs = json.loads(calls[2]["releaseConfigs"])
+    assert all(call["legacyTaskConfigs"] == "" for call in calls)
     assert [item["releaseId"] for item in release_configs] == ["release_shared"]
     assert [item["id"] for item in release_configs[0]["tasks"]] == ["task_a", "task_b"]
     assert client.states.count("healthy") == 2
@@ -330,18 +345,18 @@ def test_agent_activates_multiple_releases_as_one_desired_revision(
             },
         ],
         "tasks": [
-            {
-                "id": "task_deeplab",
-                "deploymentTargetId": "target_deeplab",
-                "releaseId": "release_deeplab",
-                "inputUri": "rtsp://camera/deeplab",
-            },
-            {
-                "id": "task_ppocr",
-                "deploymentTargetId": "target_ppocr",
-                "releaseId": "release_ppocr",
-                "inputUri": "rtsp://camera/ppocr",
-            },
+            _graph_task(
+                "task_deeplab",
+                "release_deeplab",
+                "target_deeplab",
+                "rtsp://camera/deeplab",
+            ),
+            _graph_task(
+                "task_ppocr",
+                "release_ppocr",
+                "target_ppocr",
+                "rtsp://camera/ppocr",
+            ),
         ],
     }
     calls: list[tuple[str, str]] = []

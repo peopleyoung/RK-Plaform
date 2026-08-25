@@ -5,6 +5,7 @@ import { loadAllPages } from '../api/pagination'
 import { usePlatform } from '../api/PlatformContext'
 import { formatTime, jobStatusLabels, jobTone, variantLabel } from '../api/presentation'
 import { Button, ChevronAction, EmptyState, MetricCard, PageHeader, ProgressBar, StatusBadge } from '../components'
+import { primaryReleaseId } from '../inferenceGraph'
 import type { Deployment, InferenceSummary, InferenceTask, Job, ModelRelease, RouteKey, ServiceEndpoint, StatusTone, WorkerNode } from '../types'
 
 const emptyInferenceSummary: InferenceSummary = {
@@ -169,7 +170,7 @@ export function OverviewPage({ onNavigate, onCreateTraining }: { onNavigate: (ro
   const inferenceActivities: OverviewTask[] = visibleInferenceTasks.map((task) => ({
     id: task.id,
     name: task.name,
-    model: releaseName(modelReleases, task.releaseId),
+    model: releaseName(modelReleases, primaryReleaseId(task)),
     type: '推理任务',
     progress: taskProgress(task, deployments),
     stage: inferenceStatusLabels[task.status],
@@ -181,7 +182,7 @@ export function OverviewPage({ onNavigate, onCreateTraining }: { onNavigate: (ro
   const deploymentActivities: OverviewTask[] = deployments.map((deployment) => ({
     id: deployment.id,
     name: deployment.name,
-    model: releaseName(modelReleases, deployment.releaseId),
+    model: `${deployment.targets.length} 个图修订`,
     type: '模型部署',
     progress: deploymentProgress(deployment),
     stage: deployment.targets.find((target) => !['healthy', 'rolled_back'].includes(target.state))?.stage ?? deploymentStatusLabels[deployment.status],

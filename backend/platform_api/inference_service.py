@@ -24,6 +24,8 @@ from .contracts import (
     DeploymentTargetReport,
     DeploymentTargetResponse,
     DeploymentTargetState,
+    InferenceGraphRevisionResponse,
+    InferenceGraphTaskCreate,
     InferenceNodeConnectivity,
     InferenceNodeCreate,
     InferenceNodeCreated,
@@ -35,7 +37,6 @@ from .contracts import (
     InferenceNodeRegistrationResponse,
     InferenceNodeResponse,
     InferenceSummaryResponse,
-    InferenceTaskCreate,
     InferenceTaskListResponse,
     InferenceTaskResponse,
     InferenceTaskStatus,
@@ -57,6 +58,7 @@ from .db_models import (
     DeploymentEventRecord,
     DeploymentRecord,
     DeploymentTargetRecord,
+    InferenceGraphRevisionRecord,
     InferenceMediaBindingRecord,
     InferenceNodeRecord,
     InferenceTaskRecord,
@@ -66,18 +68,27 @@ from .db_models import (
     NodeGroupRecord,
     ServiceEndpointRecord,
 )
-from .errors import AuthenticationError, ConflictError, NotFoundError
+from .errors import AppError, AuthenticationError, ConflictError, NotFoundError
+from .inference_graph import (
+    GraphLayout,
+    GraphRuntimeProjection,
+    GraphValidationIssue,
+    GraphValidationRequest,
+    GraphValidationResponse,
+    InferenceGraph,
+    graph_hash,
+    graph_release_ids,
+    graph_validation_response,
+    normalize_graph,
+    project_graph,
+)
 from .media_contracts import PreviewCapability
 from .media_service import MediaService
 from .service import new_id
 from .state_machine import as_utc, utc_now
 
 ADAPTER_BY_OUTPUT_CONTRACT = {
-    "rknn_yolov5_anchored_heads_v1": "yolo_anchored_v1",
-    "rknn_yolov6_split_heads_v1": "yolo_v6_split_v1",
-    "rknn_yolov7_anchored_heads_v1": "yolo_anchored_v1",
     "rknn_yolo_dfl_split_heads_v1": "yolo_dfl_split_v1",
-    "rknn_yolov10_split_heads_v1": "yolo_v10_split_v1",
     "semantic_logits_nchw_v1": "deeplab_logits_v1",
     "ppocr_db_probability_map_v1": "ppocr_db_det_v1",
     "ppocr_ctc_logits_v1": "ppocr_ctc_rec_v1",
@@ -131,16 +142,10 @@ def _mapping(mapping: dict[str, Any], key: str) -> dict[str, Any]:
 def _direct_runtime_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     diagnostics_value = metadata.get("diagnostics")
     diagnostics = (
-        cast(dict[str, Any], diagnostics_value)
-        if isinstance(diagnostics_value, dict)
-        else {}
+        cast(dict[str, Any], diagnostics_value) if isinstance(diagnostics_value, dict) else {}
     )
     inference_value = diagnostics.get("inference")
-    return (
-        cast(dict[str, Any], inference_value)
-        if isinstance(inference_value, dict)
-        else {}
-    )
+    return cast(dict[str, Any], inference_value) if isinstance(inference_value, dict) else {}
 
 
 def _string_list(value: object) -> list[str] | None:
@@ -212,23 +217,25 @@ def node_group_response(record: NodeGroupRecord) -> NodeGroupResponse:
 def inference_task_response(
     record: InferenceTaskRecord, preview_capability: PreviewCapability
 ) -> InferenceTaskResponse:
+    if record.graph_revision_id is None or not record.graph_json:
+        raise ConflictError(
+            "graph_migration_required",
+            "Legacy inference tasks must be backed up and removed before using graph tasks",
+            taskId=record.id,
+        )
     return InferenceTaskResponse(
         id=record.id,
         name=record.name,
         status=InferenceTaskStatus(record.status),
-        release_id=record.release_id,
         node_id=record.node_id,
         group_id=record.group_id,
         input_uri=record.input_uri,
-        interval=record.interval,
-        thresholds=record.thresholds_json,
-        output=record.output_json,
-        media=record.media_json,
-        analytics=record.analytics_json,
+        graph=InferenceGraph.model_validate(record.graph_json),
+        layout=GraphLayout.model_validate(record.graph_layout_json or {}),
+        graph_revision_id=record.graph_revision_id,
+        graph_hash=record.graph_hash,
         npu_core_mask=NpuCoreMask(record.npu_core_mask),
         npu_core_policy=NpuCorePolicy(record.npu_core_policy),
-        context_count=record.context_count,
-        worker_count=record.worker_count,
         preview_capability=preview_capability,
         config_revision=record.config_revision,
         error_message=record.error_message,
@@ -238,13 +245,19 @@ def inference_task_response(
 
 
 def deployment_target_response(record: DeploymentTargetRecord) -> DeploymentTargetResponse:
+    if record.graph_revision_id is None or not record.graph_hash:
+        raise ConflictError(
+            "graph_migration_required",
+            "Legacy deployment targets do not contain an inference graph snapshot",
+            targetId=record.id,
+        )
     return DeploymentTargetResponse(
         id=record.id,
         deployment_id=record.deployment_id,
         node_id=record.node_id,
         task_id=record.task_id,
-        release_id=record.release_id,
-        previous_release_id=record.previous_release_id,
+        graph_revision_id=record.graph_revision_id,
+        graph_hash=record.graph_hash,
         sequence=record.sequence,
         desired_revision=record.desired_revision,
         state=DeploymentTargetState(record.state),
@@ -262,14 +275,205 @@ class InferenceService:
     def __init__(self, context: AppContext) -> None:
         self.context = context
 
+    def validate_graph(self, payload: GraphValidationRequest) -> GraphValidationResponse:
+        normalized = normalize_graph(payload.graph)
+        release_ids = {
+            release_id
+            for node in normalized.nodes
+            if node.operator in {"inference.primary", "inference.secondary"}
+            and isinstance((release_id := node.config.get("releaseId")), str)
+            and release_id
+        }
+        with self.context.database.session() as session:
+            releases = session.scalars(
+                select(ModelReleaseRecord).where(
+                    ModelReleaseRecord.id.in_(release_ids),
+                    ModelReleaseRecord.status == ModelReleaseStatus.PUBLISHED.value,
+                )
+            ).all()
+            release_adapters = {release.id: release.adapter for release in releases}
+            initial = graph_validation_response(normalized, release_adapters=release_adapters)
+            if not initial.valid:
+                return initial
+
+            projection = project_graph(normalized)
+            runtime_issues: list[GraphValidationIssue] = []
+            if (
+                projection.media.get("decoder") == "rkmpp"
+                and payload.input_uri is not None
+                and not payload.input_uri.startswith("rtsp://")
+            ):
+                runtime_issues.append(
+                    GraphValidationIssue(
+                        code="rkmpp_input_invalid",
+                        message="MPP capture requires an RTSP input URI",
+                        path="inputUri",
+                    )
+                )
+            try:
+                MediaService(self.context).validate_task_media(
+                    session,
+                    projection.media,
+                    task_id=payload.task_id,
+                )
+            except AppError as error:
+                runtime_issues.append(
+                    GraphValidationIssue(
+                        code=error.code,
+                        message=error.message,
+                        path="graph.nodes",
+                        details=error.details,
+                    )
+                )
+            if runtime_issues:
+                initial.valid = False
+                initial.normalized_graph = None
+                initial.graph_hash = None
+                initial.issues.extend(runtime_issues)
+                return initial
+
+            required_features = set(initial.required_features)
+            required_adapters = set(initial.required_adapters)
+            candidates = session.scalars(
+                select(InferenceNodeRecord).where(
+                    InferenceNodeRecord.lifecycle == InferenceNodeLifecycle.ACTIVE.value,
+                    InferenceNodeRecord.self_test_passed.is_(True),
+                )
+            ).all()
+            compatible = [
+                node.id
+                for node in candidates
+                if self._node_connectivity(node) == InferenceNodeConnectivity.ONLINE
+                and required_adapters.issubset(node.adapters_json)
+                and required_features.issubset(self._node_media_features(node))
+                and initial.required_contexts <= node.max_model_instances
+            ]
+            response = graph_validation_response(
+                normalized,
+                release_adapters=release_adapters,
+                compatible_node_ids=compatible,
+            )
+            if payload.node_id is not None and payload.node_id not in compatible:
+                response.valid = False
+                response.normalized_graph = None
+                response.graph_hash = None
+                response.issues.append(
+                    GraphValidationIssue(
+                        code="node_incompatible",
+                        message="The selected node cannot execute this inference graph",
+                        path="nodeId",
+                        details={"nodeId": payload.node_id},
+                    )
+                )
+            return response
+
+    def _validate_graph_task(
+        self,
+        session: Session,
+        payload: InferenceGraphTaskCreate,
+        *,
+        task_id: str | None = None,
+    ) -> tuple[InferenceGraph, GraphRuntimeProjection, InferenceNodeRecord]:
+        graph = normalize_graph(payload.graph)
+        release_ids = {
+            release_id
+            for node in graph.nodes
+            if node.operator in {"inference.primary", "inference.secondary"}
+            and isinstance((release_id := node.config.get("releaseId")), str)
+            and release_id
+        }
+        releases = session.scalars(
+            select(ModelReleaseRecord).where(
+                ModelReleaseRecord.id.in_(release_ids),
+                ModelReleaseRecord.status == ModelReleaseStatus.PUBLISHED.value,
+            )
+        ).all()
+        release_by_id = {release.id: release for release in releases}
+        validation = graph_validation_response(
+            graph,
+            release_adapters={release.id: release.adapter for release in releases},
+        )
+        if not validation.valid:
+            raise ConflictError(
+                "inference_graph_invalid",
+                "Inference graph validation failed",
+                issues=[
+                    issue.model_dump(mode="json", by_alias=True) for issue in validation.issues
+                ],
+            )
+        projection = project_graph(graph)
+        if projection.media.get("decoder") == "rkmpp" and not payload.input_uri.startswith(
+            "rtsp://"
+        ):
+            raise ConflictError(
+                "rkmpp_input_invalid",
+                "MPP capture requires an RTSP input URI",
+            )
+        release = release_by_id[projection.primary_release_id]
+        self._validate_task_media(projection.media, release.adapter)
+        MediaService(self.context).validate_task_media(session, projection.media, task_id=task_id)
+        secondary_releases = self._validate_task_analytics(
+            session, projection.analytics, release, projection.media
+        )
+        node = self._select_node(
+            session,
+            payload.node_id,
+            payload.group_id,
+            release.adapter,
+            projection.media,
+            projection.analytics,
+            secondary_releases,
+        )
+        return graph, projection, node
+
+    @staticmethod
+    def _create_graph_revision(
+        session: Session,
+        task: InferenceTaskRecord,
+        graph: InferenceGraph,
+        revision: int,
+    ) -> InferenceGraphRevisionRecord:
+        record = InferenceGraphRevisionRecord(
+            id=new_id("graphrev"),
+            task_id=task.id,
+            revision=revision,
+            schema_version=graph.schema_version,
+            catalog_version=graph.catalog_version,
+            graph_json=graph.model_dump(mode="json", by_alias=True),
+            graph_hash=graph_hash(graph),
+        )
+        session.add(record)
+        session.flush()
+        return record
+
+    def list_graph_revisions(self, task_id: str) -> list[InferenceGraphRevisionResponse]:
+        with self.context.database.session() as session:
+            self._task(session, task_id)
+            records = session.scalars(
+                select(InferenceGraphRevisionRecord)
+                .where(InferenceGraphRevisionRecord.task_id == task_id)
+                .order_by(InferenceGraphRevisionRecord.revision.desc())
+            ).all()
+            return [self._graph_revision_response(record) for record in records]
+
+    @staticmethod
+    def _graph_revision_response(
+        record: InferenceGraphRevisionRecord,
+    ) -> InferenceGraphRevisionResponse:
+        return InferenceGraphRevisionResponse(
+            id=record.id,
+            task_id=record.task_id,
+            revision=record.revision,
+            graph=InferenceGraph.model_validate(record.graph_json),
+            graph_hash=record.graph_hash,
+            created_at=record.created_at,
+        )
+
     @staticmethod
     def _validate_task_media(media: dict[str, Any], adapter: str) -> None:
         tracking_value = media.get("tracking", {})
         tracking = cast(dict[str, Any], tracking_value) if isinstance(tracking_value, dict) else {}
-        if (
-            tracking.get("enabled") is True
-            and not adapter.startswith("yolo_")
-        ):
+        if tracking.get("enabled") is True and not adapter.startswith("yolo_"):
             raise ConflictError(
                 "tracking_adapter_mismatch",
                 "ByteTrack can only be enabled for detection model releases",
@@ -332,9 +536,7 @@ class InferenceService:
         media: dict[str, Any],
     ) -> list[ModelReleaseRecord]:
         uses_detection_business = bool(
-            analytics.get("areas")
-            or analytics.get("lines")
-            or analytics.get("secondaryModels")
+            analytics.get("areas") or analytics.get("lines") or analytics.get("secondaryModels")
         )
         if uses_detection_business and not release.adapter.startswith("yolo_"):
             raise ConflictError(
@@ -342,12 +544,10 @@ class InferenceService:
                 "Area, line and secondary inference require a detection model release",
                 adapter=release.adapter,
             )
-        if (analytics.get("areas") or analytics.get("lines")):
+        if analytics.get("areas") or analytics.get("lines"):
             tracking_value = media.get("tracking", {})
             tracking = (
-                cast(dict[str, Any], tracking_value)
-                if isinstance(tracking_value, dict)
-                else {}
+                cast(dict[str, Any], tracking_value) if isinstance(tracking_value, dict) else {}
             )
             if tracking.get("enabled") is not True:
                 raise ConflictError(
@@ -374,9 +574,7 @@ class InferenceService:
             return set()
         return {str(item) for item in cast(list[object], raw) if isinstance(item, str)}
 
-    def _validate_node_media(
-        self, node: InferenceNodeRecord, media: dict[str, Any]
-    ) -> None:
+    def _validate_node_media(self, node: InferenceNodeRecord, media: dict[str, Any]) -> None:
         required = self._required_media_features(media)
         missing = sorted(required - self._node_media_features(node))
         if missing:
@@ -572,18 +770,21 @@ class InferenceService:
                     "Only deprecated model releases can be deleted",
                     status=record.status,
                 )
-            task_ids = list(
-                session.scalars(
-                    select(InferenceTaskRecord.id).where(
-                        InferenceTaskRecord.release_id == release_id
-                    )
-                ).all()
-            )
-            secondary_task_ids = [
+            task_ids = [
                 task.id
                 for task in session.scalars(select(InferenceTaskRecord)).all()
-                if release_id in self._secondary_release_ids(task.analytics_json)
+                if (
+                    task.graph_json
+                    and release_id
+                    in graph_release_ids(InferenceGraph.model_validate(task.graph_json))
+                )
+                or (not task.graph_json and task.release_id == release_id)
             ]
+            revision_count = sum(
+                release_id
+                in graph_release_ids(InferenceGraph.model_validate(revision.graph_json))
+                for revision in session.scalars(select(InferenceGraphRevisionRecord)).all()
+            )
             deployment_count = (
                 session.scalar(
                     select(func.count())
@@ -593,22 +794,24 @@ class InferenceService:
                 or 0
             )
             target_count = (
-                session.scalar(
-                    select(func.count())
-                    .select_from(DeploymentTargetRecord)
-                    .where(
-                        (DeploymentTargetRecord.release_id == release_id)
-                        | (DeploymentTargetRecord.previous_release_id == release_id)
+                sum(
+                    release_id
+                    in graph_release_ids(InferenceGraph.model_validate(snapshot))
+                    for target in session.scalars(select(DeploymentTargetRecord)).all()
+                    for snapshot in (
+                        target.graph_snapshot_json,
+                        target.previous_graph_snapshot_json,
                     )
+                    if snapshot
                 )
-                or 0
             )
-            referenced_task_ids = sorted(set(task_ids + secondary_task_ids))
-            if referenced_task_ids or deployment_count or target_count:
+            referenced_task_ids = sorted(set(task_ids))
+            if referenced_task_ids or revision_count or deployment_count or target_count:
                 raise ConflictError(
                     "model_release_in_use",
                     "Delete referencing inference tasks and deployment history first",
                     taskIds=referenced_task_ids,
+                    graphRevisionCount=revision_count,
                     deploymentCount=deployment_count,
                     deploymentTargetCount=target_count,
                 )
@@ -636,9 +839,7 @@ class InferenceService:
             records = session.scalars(select(NodeGroupRecord).order_by(NodeGroupRecord.name)).all()
             return [node_group_response(item) for item in records]
 
-    def update_node_group(
-        self, group_id: str, payload: NodeGroupUpdate
-    ) -> NodeGroupResponse:
+    def update_node_group(self, group_id: str, payload: NodeGroupUpdate) -> NodeGroupResponse:
         with self.context.database.session() as session:
             record = session.get(NodeGroupRecord, group_id)
             if record is None:
@@ -739,9 +940,7 @@ class InferenceService:
         runtime = _direct_runtime_metadata(metadata)
         diagnostics_value = metadata.get("diagnostics")
         diagnostics = (
-            cast(dict[str, Any], diagnostics_value)
-            if isinstance(diagnostics_value, dict)
-            else {}
+            cast(dict[str, Any], diagnostics_value) if isinstance(diagnostics_value, dict) else {}
         )
         record = InferenceNodeRecord(
             id=new_id("inode"),
@@ -758,9 +957,7 @@ class InferenceService:
                 else InferenceNodeConnectivity.OFFLINE.value
             ),
             health=(
-                InferenceNodeHealth.HEALTHY.value
-                if enabled
-                else InferenceNodeHealth.UNKNOWN.value
+                InferenceNodeHealth.HEALTHY.value if enabled else InferenceNodeHealth.UNKNOWN.value
             ),
             deployment_status="idle",
             max_model_instances=max_model_instances,
@@ -829,15 +1026,11 @@ class InferenceService:
         record = self._node(session, node_id)
         diagnostics_value = metadata.get("diagnostics")
         diagnostics = (
-            cast(dict[str, Any], diagnostics_value)
-            if isinstance(diagnostics_value, dict)
-            else {}
+            cast(dict[str, Any], diagnostics_value) if isinstance(diagnostics_value, dict) else {}
         )
         inference_value = diagnostics.get("inference")
         inference = (
-            cast(dict[str, Any], inference_value)
-            if isinstance(inference_value, dict)
-            else {}
+            cast(dict[str, Any], inference_value) if isinstance(inference_value, dict) else {}
         )
         if enabled and (
             diagnostics.get("inferenceSelfTestPassed") is not True
@@ -866,9 +1059,7 @@ class InferenceService:
         runtime = _direct_runtime_metadata(metadata)
         diagnostics_value = metadata.get("diagnostics")
         diagnostics = (
-            cast(dict[str, Any], diagnostics_value)
-            if isinstance(diagnostics_value, dict)
-            else {}
+            cast(dict[str, Any], diagnostics_value) if isinstance(diagnostics_value, dict) else {}
         )
         duplicate = session.scalar(
             select(InferenceNodeRecord).where(
@@ -900,9 +1091,7 @@ class InferenceService:
             else InferenceNodeConnectivity.OFFLINE.value
         )
         record.health = (
-            InferenceNodeHealth.HEALTHY.value
-            if enabled
-            else InferenceNodeHealth.UNKNOWN.value
+            InferenceNodeHealth.HEALTHY.value if enabled else InferenceNodeHealth.UNKNOWN.value
         )
         record.lifecycle = (
             InferenceNodeLifecycle.ACTIVE.value
@@ -1171,9 +1360,7 @@ class InferenceService:
                 select(InferenceTaskRecord).where(InferenceTaskRecord.node_id == node_id)
             ).all()
             non_retired_tasks = [
-                task
-                for task in tasks
-                if task.status != InferenceTaskStatus.RETIRED.value
+                task for task in tasks if task.status != InferenceTaskStatus.RETIRED.value
             ]
             target_count = (
                 session.scalar(
@@ -1211,9 +1398,7 @@ class InferenceService:
             endpoint_ids = [endpoint.id for endpoint in endpoints]
             for endpoint in endpoints:
                 cleanups = session.scalars(
-                    select(NodeCleanupRecord).where(
-                        NodeCleanupRecord.endpoint_id == endpoint.id
-                    )
+                    select(NodeCleanupRecord).where(NodeCleanupRecord.endpoint_id == endpoint.id)
                 ).all()
                 for cleanup in cleanups:
                     session.delete(cleanup)
@@ -1224,6 +1409,11 @@ class InferenceService:
                         InferenceMediaBindingRecord.task_id == task.id
                     )
                 )
+                session.execute(
+                    delete(InferenceGraphRevisionRecord).where(
+                        InferenceGraphRevisionRecord.task_id == task.id
+                    )
+                )
                 session.delete(task)
             session.flush()
             session.delete(record)
@@ -1232,43 +1422,35 @@ class InferenceService:
             self.context.node_secrets.delete(endpoint_id)
             self.context.node_secrets.delete(endpoint_id, purpose="agent")
 
-    def create_task(self, payload: InferenceTaskCreate) -> InferenceTaskResponse:
+    def create_task(self, payload: InferenceGraphTaskCreate) -> InferenceTaskResponse:
         with self.context.database.session() as session:
-            release = self._published_release(session, payload.release_id)
-            self._validate_task_media(payload.media, release.adapter)
-            MediaService(self.context).validate_task_media(session, payload.media)
-            secondary_releases = self._validate_task_analytics(
-                session, payload.analytics, release, payload.media
-            )
-            node = self._select_node(
-                session,
-                payload.node_id,
-                payload.group_id,
-                release.adapter,
-                payload.media,
-                payload.analytics,
-                secondary_releases,
-            )
+            graph, projection, node = self._validate_graph_task(session, payload)
+            graph_digest = graph_hash(graph)
             record = InferenceTaskRecord(
                 id=new_id("itask"),
                 name=payload.name.strip(),
-                status=InferenceTaskStatus.STOPPED.value,
-                release_id=release.id,
+                status=InferenceTaskStatus.DRAFT.value,
+                release_id=projection.primary_release_id,
                 node_id=node.id,
                 group_id=payload.group_id,
                 input_uri=payload.input_uri.strip(),
-                interval=payload.interval,
-                thresholds_json=payload.thresholds,
-                output_json=payload.output,
-                media_json=payload.media,
-                analytics_json=payload.analytics,
+                interval=projection.interval,
+                thresholds_json=projection.thresholds,
+                output_json=projection.output,
+                media_json=projection.media,
+                analytics_json=projection.analytics,
                 npu_core_mask=payload.npu_core_mask.value,
                 npu_core_policy=payload.npu_core_policy.value,
-                context_count=payload.context_count,
-                worker_count=payload.worker_count,
+                context_count=projection.context_count,
+                worker_count=projection.worker_count,
+                graph_json=graph.model_dump(mode="json", by_alias=True),
+                graph_layout_json=payload.layout.model_dump(mode="json", by_alias=True),
+                graph_hash=graph_digest,
             )
             session.add(record)
             session.flush()
+            revision = self._create_graph_revision(session, record, graph, 1)
+            record.graph_revision_id = revision.id
             MediaService(self.context).bind_task(session, record)
             return self._task_response(session, record)
 
@@ -1285,37 +1467,43 @@ class InferenceService:
                     "Stop the inference task before editing it",
                     status=record.status,
                 )
-            release = self._published_release(session, payload.release_id)
-            self._validate_task_media(payload.media, release.adapter)
-            MediaService(self.context).validate_task_media(
-                session, payload.media, task_id=record.id
-            )
-            secondary_releases = self._validate_task_analytics(
-                session, payload.analytics, release, payload.media
-            )
-            node = self._select_node(
-                session,
-                payload.node_id,
-                payload.group_id,
-                release.adapter,
-                payload.media,
-                payload.analytics,
-                secondary_releases,
-            )
+            if record.graph_revision_id != payload.base_revision_id:
+                raise ConflictError(
+                    "graph_revision_conflict",
+                    "The inference graph changed after this editor was opened",
+                    expectedRevisionId=record.graph_revision_id,
+                    suppliedRevisionId=payload.base_revision_id,
+                )
+            graph, projection, node = self._validate_graph_task(session, payload, task_id=record.id)
+            graph_digest = graph_hash(graph)
             record.name = payload.name.strip()
-            record.release_id = release.id
+            record.release_id = projection.primary_release_id
             record.node_id = node.id
             record.group_id = payload.group_id
             record.input_uri = payload.input_uri.strip()
-            record.interval = payload.interval
-            record.thresholds_json = payload.thresholds
-            record.output_json = payload.output
-            record.media_json = payload.media
-            record.analytics_json = payload.analytics
+            record.interval = projection.interval
+            record.thresholds_json = projection.thresholds
+            record.output_json = projection.output
+            record.media_json = projection.media
+            record.analytics_json = projection.analytics
             record.npu_core_mask = payload.npu_core_mask.value
             record.npu_core_policy = payload.npu_core_policy.value
-            record.context_count = payload.context_count
-            record.worker_count = payload.worker_count
+            record.context_count = projection.context_count
+            record.worker_count = projection.worker_count
+            record.graph_json = graph.model_dump(mode="json", by_alias=True)
+            record.graph_layout_json = payload.layout.model_dump(mode="json", by_alias=True)
+            if graph_digest != record.graph_hash:
+                latest_revision = session.scalar(
+                    select(func.max(InferenceGraphRevisionRecord.revision)).where(
+                        InferenceGraphRevisionRecord.task_id == record.id
+                    )
+                )
+                revision = self._create_graph_revision(
+                    session, record, graph, int(latest_revision or 0) + 1
+                )
+                record.graph_revision_id = revision.id
+                record.graph_hash = graph_digest
+            record.status = InferenceTaskStatus.DRAFT.value
             record.media_migration_required = False
             record.error_message = None
             MediaService(self.context).bind_task(session, record)
@@ -1379,7 +1567,7 @@ class InferenceService:
                 )
             release = self._published_release(session, task.release_id)
             node = self._validate_task_for_deployment(session, task, release)
-            self._validate_node_runtime_plan(session, node, [task], release.id)
+            self._validate_node_runtime_plan(session, node, [task])
             previous_status = task.status
             reserved = (
                 session.query(InferenceTaskRecord)
@@ -1534,8 +1722,13 @@ class InferenceService:
                         InferenceTaskStatus.DEGRADED.value,
                     }
                     and target.previous_release_id
+                    and target.previous_graph_revision_id
+                    and target.previous_graph_snapshot_json
                 ):
                     target.release_id = target.previous_release_id
+                    target.graph_revision_id = target.previous_graph_revision_id
+                    target.graph_snapshot_json = target.previous_graph_snapshot_json
+                    target.graph_hash = target.previous_graph_hash
                     target.state = DeploymentTargetState.PENDING.value
                     target.desired_revision = 0
                     target.progress = 0
@@ -1611,96 +1804,117 @@ class InferenceService:
                 )
             return self._desired_state(session, node)
 
-    def _desired_state(
-        self, session: Session, node: InferenceNodeRecord
-    ) -> AgentDesiredState:
-            tasks = session.scalars(
-                select(InferenceTaskRecord)
-                .where(
-                    InferenceTaskRecord.node_id == node.id,
-                    InferenceTaskRecord.status.in_(ACTIVE_TASK_STATUSES),
-                )
-                .order_by(InferenceTaskRecord.id)
-            ).all()
-            releases_by_id: dict[str, ModelReleaseRecord] = {}
-            task_descriptors: list[AgentTaskDescriptor] = []
-            for task in tasks:
-                release = self._release(session, task.release_id)
-                releases_by_id[release.id] = release
-                for secondary_release_id in self._secondary_release_ids(task.analytics_json):
-                    secondary_release = self._release(session, secondary_release_id)
-                    releases_by_id[secondary_release.id] = secondary_release
-                target = session.scalar(
-                    select(DeploymentTargetRecord)
-                    .where(
-                        DeploymentTargetRecord.node_id == node.id,
-                        DeploymentTargetRecord.task_id == task.id,
-                        DeploymentTargetRecord.desired_revision == task.config_revision,
-                    )
-                    .order_by(DeploymentTargetRecord.updated_at.desc())
-                )
-                task_descriptors.append(
-                    AgentTaskDescriptor(
-                        id=task.id,
-                        name=task.name,
-                        release_id=task.release_id,
-                        deployment_target_id=target.id if target else None,
-                        input_uri=task.input_uri,
-                        interval=task.interval,
-                        thresholds=task.thresholds_json,
-                        output=task.output_json,
-                        media=MediaService(self.context).node_media(session, task),
-                        analytics=task.analytics_json,
-                        npu_core_mask=NpuCoreMask(task.npu_core_mask),
-                        npu_core_policy=NpuCorePolicy(task.npu_core_policy),
-                        config_revision=task.config_revision,
-                        context_count=task.context_count,
-                        worker_count=task.worker_count,
-                    )
-                )
-            release_descriptors: list[AgentReleaseDescriptor] = []
-            for release in sorted(releases_by_id.values(), key=lambda item: item.id):
-                artifact = session.get(ArtifactRecord, release.rknn_artifact_id)
-                if artifact is None:
-                    raise ConflictError(
-                        "release_artifact_missing",
-                        "Published release artifact is missing",
-                        releaseId=release.id,
-                    )
-                release_descriptors.append(
-                    AgentReleaseDescriptor(
-                        id=release.id,
-                        name=release.name,
-                        version=release.version,
-                        adapter=release.adapter,
-                        artifact=AgentArtifactDescriptor(
-                            id=artifact.id,
-                            filename=artifact.filename,
-                            sha256=artifact.sha256,
-                            size_bytes=artifact.size_bytes,
-                            media_type=artifact.media_type,
-                        ),
-                        manifest=_agent_manifest(release.manifest_json),
-                    )
-                )
-            content = {
-                "nodeId": node.id,
-                "revision": node.desired_revision,
-                "releases": [
-                    item.model_dump(mode="json", by_alias=True) for item in release_descriptors
-                ],
-                "tasks": [item.model_dump(mode="json", by_alias=True) for item in task_descriptors],
-            }
-            config_hash = hashlib.sha256(
-                json.dumps(content, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            ).hexdigest()
-            return AgentDesiredState(
-                node_id=node.id,
-                revision=node.desired_revision,
-                config_hash=config_hash,
-                releases=release_descriptors,
-                tasks=task_descriptors,
+    def _desired_state(self, session: Session, node: InferenceNodeRecord) -> AgentDesiredState:
+        tasks = session.scalars(
+            select(InferenceTaskRecord)
+            .where(
+                InferenceTaskRecord.node_id == node.id,
+                InferenceTaskRecord.status.in_(ACTIVE_TASK_STATUSES),
             )
+            .order_by(InferenceTaskRecord.id)
+        ).all()
+        releases_by_id: dict[str, ModelReleaseRecord] = {}
+        task_descriptors: list[AgentTaskDescriptor] = []
+        for task in tasks:
+            target = session.scalar(
+                select(DeploymentTargetRecord)
+                .where(
+                    DeploymentTargetRecord.node_id == node.id,
+                    DeploymentTargetRecord.task_id == task.id,
+                    DeploymentTargetRecord.desired_revision == task.config_revision,
+                )
+                .order_by(DeploymentTargetRecord.updated_at.desc())
+            )
+            graph_revision_id = (
+                target.graph_revision_id
+                if target is not None and target.graph_revision_id is not None
+                else task.graph_revision_id
+            )
+            graph_payload = (
+                target.graph_snapshot_json
+                if target is not None and target.graph_snapshot_json
+                else task.graph_json
+            )
+            graph_digest = (
+                target.graph_hash if target is not None and target.graph_hash else task.graph_hash
+            )
+            if graph_revision_id is None or not graph_payload or not graph_digest:
+                raise ConflictError(
+                    "graph_migration_required",
+                    "Inference agent cannot consume a legacy task without a graph revision",
+                    taskId=task.id,
+                )
+            graph = InferenceGraph.model_validate(graph_payload)
+            for graph_node in graph.nodes:
+                if graph_node.operator not in {
+                    "inference.primary",
+                    "inference.secondary",
+                }:
+                    continue
+                release_id = graph_node.config.get("releaseId")
+                if isinstance(release_id, str) and release_id:
+                    release = self._release(session, release_id)
+                    releases_by_id[release.id] = release
+            task_descriptors.append(
+                AgentTaskDescriptor(
+                    id=task.id,
+                    name=task.name,
+                    deployment_target_id=target.id if target else None,
+                    input_uri=task.input_uri,
+                    graph=graph,
+                    graph_revision_id=graph_revision_id,
+                    graph_hash=graph_digest,
+                    runtime_bindings={
+                        "media": MediaService(self.context).node_media(session, task)
+                    },
+                    npu_core_mask=NpuCoreMask(task.npu_core_mask),
+                    npu_core_policy=NpuCorePolicy(task.npu_core_policy),
+                    config_revision=task.config_revision,
+                )
+            )
+        release_descriptors: list[AgentReleaseDescriptor] = []
+        for release in sorted(releases_by_id.values(), key=lambda item: item.id):
+            artifact = session.get(ArtifactRecord, release.rknn_artifact_id)
+            if artifact is None:
+                raise ConflictError(
+                    "release_artifact_missing",
+                    "Published release artifact is missing",
+                    releaseId=release.id,
+                )
+            release_descriptors.append(
+                AgentReleaseDescriptor(
+                    id=release.id,
+                    name=release.name,
+                    version=release.version,
+                    adapter=release.adapter,
+                    artifact=AgentArtifactDescriptor(
+                        id=artifact.id,
+                        filename=artifact.filename,
+                        sha256=artifact.sha256,
+                        size_bytes=artifact.size_bytes,
+                        media_type=artifact.media_type,
+                    ),
+                    manifest=_agent_manifest(release.manifest_json),
+                )
+            )
+        content = {
+            "nodeId": node.id,
+            "revision": node.desired_revision,
+            "releases": [
+                item.model_dump(mode="json", by_alias=True) for item in release_descriptors
+            ],
+            "tasks": [item.model_dump(mode="json", by_alias=True) for item in task_descriptors],
+        }
+        config_hash = hashlib.sha256(
+            json.dumps(content, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return AgentDesiredState(
+            node_id=node.id,
+            revision=node.desired_revision,
+            config_hash=config_hash,
+            releases=release_descriptors,
+            tasks=task_descriptors,
+        )
 
     def report_target(
         self, node_id: str, target_id: str, token: str, payload: DeploymentTargetReport
@@ -1761,8 +1975,14 @@ class InferenceService:
                 if (
                     target.previous_task_status in ACTIVE_TASK_STATUSES
                     and target.previous_release_id
+                    and target.previous_graph_revision_id
+                    and target.previous_graph_snapshot_json
                 ):
                     task.release_id = target.previous_release_id
+                    target.release_id = target.previous_release_id
+                    target.graph_revision_id = target.previous_graph_revision_id
+                    target.graph_snapshot_json = target.previous_graph_snapshot_json
+                    target.graph_hash = target.previous_graph_hash
                     task.status = InferenceTaskStatus.DEGRADED.value
                 else:
                     task.status = InferenceTaskStatus.FAILED.value
@@ -1798,12 +2018,16 @@ class InferenceService:
             allowed_release_ids = {task.release_id for task in tasks}
             for task in tasks:
                 allowed_release_ids.update(self._secondary_release_ids(task.analytics_json))
-            allowed = session.scalar(
-                select(ModelReleaseRecord).where(
-                    ModelReleaseRecord.id.in_(allowed_release_ids),
-                    ModelReleaseRecord.rknn_artifact_id == artifact_id,
+            allowed = (
+                session.scalar(
+                    select(ModelReleaseRecord).where(
+                        ModelReleaseRecord.id.in_(allowed_release_ids),
+                        ModelReleaseRecord.rknn_artifact_id == artifact_id,
+                    )
                 )
-            ) if allowed_release_ids else None
+                if allowed_release_ids
+                else None
+            )
             if allowed is None:
                 raise AuthenticationError("Artifact is not assigned to this inference node")
             artifact = session.get(ArtifactRecord, artifact_id)
@@ -2026,7 +2250,6 @@ class InferenceService:
         session: Session,
         node: InferenceNodeRecord,
         candidates: list[InferenceTaskRecord],
-        release_id: str,
     ) -> None:
         active_tasks = session.scalars(
             select(InferenceTaskRecord).where(
@@ -2037,10 +2260,8 @@ class InferenceService:
         planned: dict[str, tuple[InferenceTaskRecord, str]] = {
             task.id: (task, task.release_id) for task in active_tasks
         }
-        planned.update({task.id: (task, release_id) for task in candidates})
-        instances: dict[
-            tuple[str, str, str, str, str, int, int], list[InferenceTaskRecord]
-        ] = {}
+        planned.update({task.id: (task, task.release_id) for task in candidates})
+        instances: dict[tuple[str, str, str, str, str, int, int], list[InferenceTaskRecord]] = {}
         for task, planned_release_id in planned.values():
             key = self._runtime_instance_key(task, planned_release_id)
             instances.setdefault(key, []).append(task)
@@ -2085,7 +2306,6 @@ class InferenceService:
         *,
         previous_task_statuses: dict[str, str] | None = None,
     ) -> DeploymentResponse:
-        release = self._published_release(session, payload.release_id)
         tasks = [self._task(session, item) for item in payload.task_ids]
         tasks_by_node: dict[str, list[InferenceTaskRecord]] = {}
         for task in tasks:
@@ -2101,34 +2321,55 @@ class InferenceService:
                     taskId=task.id,
                     status=task.status,
                 )
+            release = self._published_release(session, task.release_id)
             node = self._validate_task_for_deployment(session, task, release)
             tasks_by_node.setdefault(node.id, []).append(task)
         for node_id, node_tasks in tasks_by_node.items():
-            self._validate_node_runtime_plan(
-                session, self._node(session, node_id), node_tasks, release.id
-            )
+            self._validate_node_runtime_plan(session, self._node(session, node_id), node_tasks)
         deployment = DeploymentRecord(
             id=new_id("deployment"),
             name=payload.name.strip(),
             status=DeploymentStatus.QUEUED.value,
-            release_id=release.id,
+            release_id=tasks[0].release_id,
             strategy=payload.strategy,
             batch_size=payload.batch_size,
         )
         session.add(deployment)
         session.flush()
         for sequence, task in enumerate(tasks):
+            if task.graph_revision_id is None or not task.graph_json or not task.graph_hash:
+                raise ConflictError(
+                    "graph_migration_required",
+                    "Legacy tasks cannot be deployed with the graph contract",
+                    taskId=task.id,
+                )
+            previous_target = session.scalar(
+                select(DeploymentTargetRecord)
+                .where(
+                    DeploymentTargetRecord.task_id == task.id,
+                    DeploymentTargetRecord.state == DeploymentTargetState.HEALTHY.value,
+                )
+                .order_by(DeploymentTargetRecord.updated_at.desc())
+            )
             session.add(
                 DeploymentTargetRecord(
                     id=new_id("dtarget"),
                     deployment_id=deployment.id,
                     node_id=task.node_id,
                     task_id=task.id,
-                    release_id=release.id,
-                    previous_release_id=task.release_id,
-                    previous_task_status=(previous_task_statuses or {}).get(
-                        task.id, task.status
+                    release_id=task.release_id,
+                    previous_release_id=(previous_target.release_id if previous_target else None),
+                    graph_revision_id=task.graph_revision_id,
+                    graph_snapshot_json=task.graph_json,
+                    graph_hash=task.graph_hash,
+                    previous_graph_revision_id=(
+                        previous_target.graph_revision_id if previous_target else None
                     ),
+                    previous_graph_snapshot_json=(
+                        previous_target.graph_snapshot_json if previous_target else {}
+                    ),
+                    previous_graph_hash=(previous_target.graph_hash if previous_target else ""),
+                    previous_task_status=(previous_task_statuses or {}).get(task.id, task.status),
                     sequence=sequence,
                     desired_revision=0,
                     state=DeploymentTargetState.PENDING.value,
@@ -2162,9 +2403,7 @@ class InferenceService:
             )
         self._validate_node_release(node, release.adapter)
         self._validate_node_media(node, task.media_json)
-        MediaService(self.context).validate_task_media(
-            session, task.media_json, task_id=task.id
-        )
+        MediaService(self.context).validate_task_media(session, task.media_json, task_id=task.id)
         secondary_releases = self._validate_task_analytics(
             session, task.analytics_json, release, task.media_json
         )
@@ -2203,12 +2442,8 @@ class InferenceService:
             for item in candidates
             if adapter in item.adapters_json
             and self._node_connectivity(item) == InferenceNodeConnectivity.ONLINE
-            and not (
-                self._required_media_features(media) - self._node_media_features(item)
-            )
-            and not (
-                self._required_analytics_features(analytics) - self._node_media_features(item)
-            )
+            and not (self._required_media_features(media) - self._node_media_features(item))
+            and not (self._required_analytics_features(analytics) - self._node_media_features(item))
             and all(release.adapter in item.adapters_json for release in secondary_releases)
         ]
         if not candidates:
@@ -2239,7 +2474,6 @@ class InferenceService:
             id=record.id,
             name=record.name,
             status=DeploymentStatus(record.status),
-            release_id=record.release_id,
             strategy=record.strategy,
             batch_size=record.batch_size,
             targets=[

@@ -20,6 +20,175 @@ from workers.inference_agent.runtime_adapter import (
 )
 
 
+class GraphTask(dict[str, object]):
+    def __init__(self, task_id: str, input_uri: str, release_id: str) -> None:
+        self._release_id = release_id
+        self._primary: dict[str, object] = {
+            "releaseId": release_id,
+            "interval": 1,
+            "confidence": 0.4,
+            "nms": 0.5,
+            "contextCount": 1,
+            "workerCount": 1,
+        }
+        self._media: dict[str, object] = {}
+        self._analytics: dict[str, object] = {}
+        self._output: dict[str, object] = {"type": "jsonl"}
+        super().__init__(
+            id=task_id,
+            inputUri=input_uri,
+            graphRevisionId=f"graphrev-{task_id}",
+            graphHash="a" * 64,
+            runtimeBindings={"media": {}},
+            npuCoreMask="auto",
+            npuCorePolicy="shared",
+            configRevision=1,
+        )
+        self._rebuild()
+
+    def set_release_id(self, release_id: str) -> None:
+        self._release_id = release_id
+        self._primary["releaseId"] = release_id
+        self._rebuild()
+
+    def __setitem__(self, key: str, value: object) -> None:
+        if key == "interval":
+            self._primary["interval"] = value
+        elif key == "thresholds" and isinstance(value, dict):
+            self._primary["confidence"] = value.get("confidence", 0.4)
+            self._primary["nms"] = value.get("nms", 0.5)
+        elif key in {"contextCount", "workerCount"}:
+            self._primary[key] = value
+        elif key == "output" and isinstance(value, dict):
+            self._output = dict(value)
+        elif key == "media" and isinstance(value, dict):
+            self._media = dict(value)
+        elif key == "analytics" and isinstance(value, dict):
+            self._analytics = dict(value)
+        else:
+            super().__setitem__(key, value)
+            return
+        self._rebuild()
+
+    def update(self, *args: object, **kwargs: object) -> None:
+        values = dict(*args, **kwargs)
+        for key, value in values.items():
+            self[key] = value
+
+    def _rebuild(self) -> None:
+        decoder = self._media.get("decoder", "opencv")
+        nodes: list[dict[str, object]] = [
+            {
+                "id": "capture",
+                "operator": "capture.rkmpp" if decoder == "rkmpp" else "capture.opencv",
+                "config": {},
+            },
+            {"id": "primary", "operator": "inference.primary", "config": self._primary},
+        ]
+        tracking = self._media.get("tracking")
+        secondary_models = self._analytics.get("secondaryModels", [])
+        needs_tracking = (
+            isinstance(tracking, dict) and tracking.get("enabled") is True
+        ) or bool(secondary_models)
+        if needs_tracking:
+            tracking_config = (
+                {key: value for key, value in tracking.items() if key != "enabled"}
+                if isinstance(tracking, dict)
+                else {}
+            )
+            nodes.append(
+                {
+                    "id": "tracking",
+                    "operator": "processing.bytetrack",
+                    "config": tracking_config,
+                }
+            )
+        if isinstance(secondary_models, list):
+            for index, raw_config in enumerate(secondary_models):
+                config = dict(raw_config) if isinstance(raw_config, dict) else {}
+                if "confidenceThreshold" in config:
+                    config["confidence"] = config.pop("confidenceThreshold")
+                nodes.append(
+                    {
+                        "id": f"secondary-{index}",
+                        "operator": "inference.secondary",
+                        "config": config,
+                    }
+                )
+        analytics_config = {
+            key: self._analytics[key]
+            for key in ("areas", "lines", "osd")
+            if key in self._analytics
+        }
+        if analytics_config or "events" in self._analytics:
+            nodes.append(
+                {
+                    "id": "analytics",
+                    "operator": "processing.analytics",
+                    "config": analytics_config,
+                }
+            )
+        events = self._analytics.get("events")
+        if isinstance(events, dict):
+            nodes.append(
+                {"id": "events", "operator": "processing.events", "config": dict(events)}
+            )
+
+        outputs: list[dict[str, object]] = [
+            {"id": "json-output", "operator": "output.json", "config": self._output}
+        ]
+        kafka = self._media.get("kafka")
+        if isinstance(kafka, dict) and kafka.get("enabled") is True:
+            outputs.append(
+                {
+                    "id": "kafka-output",
+                    "operator": "output.kafka",
+                    "config": {key: value for key, value in kafka.items() if key != "enabled"},
+                }
+            )
+        zlm = self._media.get("zlmSei")
+        if isinstance(zlm, dict) and zlm.get("enabled") is True:
+            outputs.append(
+                {
+                    "id": "zlm-output",
+                    "operator": "output.zlm_sei",
+                    "config": {
+                        key: value
+                        for key, value in zlm.items()
+                        if key in {"gatewayId", "streamName", "reconnectMs"}
+                    },
+                }
+            )
+        terminal = str(nodes[-1]["id"])
+        edges = [
+            {"source": nodes[index - 1]["id"], "target": node["id"]}
+            for index, node in enumerate(nodes[1:], start=1)
+        ]
+        edges.extend({"source": terminal, "target": node["id"]} for node in outputs)
+        super().__setitem__(
+            "graph",
+            {
+                "schemaVersion": 1,
+                "catalogVersion": "2026.08.25",
+                "nodes": [*nodes, *outputs],
+                "edges": edges,
+            },
+        )
+        bound_media = dict(self._media)
+        super().__setitem__("runtimeBindings", {"media": bound_media})
+
+
+class GraphRelease(dict[str, object]):
+    def __setitem__(self, key: str, value: object) -> None:
+        super().__setitem__(key, value)
+        if key == "releaseId":
+            tasks = self.get("tasks")
+            if isinstance(tasks, list):
+                for task in tasks:
+                    if isinstance(task, GraphTask):
+                        task.set_release_id(str(value))
+
+
 def _release(tmp_path: Path, *, adapter: str = "deeplab_logits_v1") -> dict[str, object]:
     model = tmp_path / f"{adapter}.rknn"
     model.write_bytes(b"rknn")
@@ -38,28 +207,17 @@ def _release(tmp_path: Path, *, adapter: str = "deeplab_logits_v1") -> dict[str,
         ),
         encoding="utf-8",
     )
-    return {
-        "releaseId": f"release_{adapter}",
+    release_id = f"release_{adapter}"
+    return GraphRelease({
+        "releaseId": release_id,
         "adapter": adapter,
         "modelPath": str(model),
         "manifestPath": str(manifest),
         "tasks": [
-            {
-                "id": "task_a",
-                "inputUri": "rtsp://camera/a",
-                "interval": 1,
-                "thresholds": {},
-                "output": {"type": "jsonl"},
-            },
-            {
-                "id": "task_b",
-                "inputUri": "rtsp://camera/b",
-                "interval": 1,
-                "thresholds": {},
-                "output": {"type": "jsonl"},
-            },
+            GraphTask("task_a", "rtsp://camera/a", release_id),
+            GraphTask("task_b", "rtsp://camera/b", release_id),
         ],
-    }
+    })
 
 
 def test_rk3588_device_contract_reports_only_missing_paths(tmp_path: Path) -> None:

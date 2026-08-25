@@ -23,17 +23,9 @@ release has been downloaded, checksummed and probed. Its primary contract is:
 - `RKNODE_RELEASE_CONFIGS` (JSON array of release/model/task groups)
 
 Each release group contains `releaseId`, `adapter`, `modelPath`,
-`manifestPath`, and `tasks`. The older single-release fields remain available
-to model probes and compatibility integrations:
-
-- `RKNODE_TASK_ID`
-- `RKNODE_RELEASE_ID`
-- `RKNODE_MODEL_PATH`
-- `RKNODE_MANIFEST_PATH`
-- `RKNODE_ADAPTER`
-- `RKNODE_INPUT_URI`
-- `RKNODE_TASK_CONFIG`
-- `RKNODE_TASK_CONFIGS` (JSON array of all tasks sharing this release/context)
+`manifestPath`, and `tasks`. The same array is passed to model probes and the
+activation command; there is no single-release or legacy task configuration
+fallback.
 
 `activate-task.sh` generates immutable JSON/YAML-compatible configs under
 `RKNODE_RUNTIME_STATE_DIR/revisions/<revision>`, groups tasks with identical
@@ -108,28 +100,29 @@ active.
 The image registers ten node types: `VideoCaptureNode`, `RkMppCaptureNode`,
 `InferNode`, `ByteTrackNode`, `SecondaryInferNode`, `AnalyticsNode`,
 `EventOutputNode`, `JsonOutputNode`, `KafkaOutputNode`, and
-`ZlmSeiOutputNode`. A task instantiates only the nodes required by its
-`media` and `analytics` fields. `AnalyticsNode` handles both area and line
-rules; `EventOutputNode` handles both snapshots and recordings. JSON, Kafka,
-and ZLM SEI are independent output branches.
+`ZlmSeiOutputNode`. A task descriptor contains a schema-v1 `graph`; the runtime
+adapter rejects legacy descriptors without it and compiles only the selected
+nodes. `AnalyticsNode` handles both area and line rules; `EventOutputNode`
+handles both snapshots and recordings. JSON, Kafka, and ZLM SEI are independent
+output branches.
 
-The optional task `media` object is converted into independent graph branches:
+The platform graph contains stable operator IDs and editable configuration:
 
 ```json
 {
-  "decoder": "rkmpp",
-  "tracking": {"enabled": true, "trackBuffer": 30},
-  "kafka": {
-    "enabled": true,
-    "brokers": "kafka-1:9092,kafka-2:9092",
-    "topic": "sei_msg",
-    "key": ""
-  },
-  "zlmSei": {
-    "enabled": true,
-    "publishUri": "rtsp://192.168.1.10:8554/live/line-a-result?publishToken=opaque",
-    "reconnectMs": 1000
-  }
+  "schemaVersion": 1,
+  "catalogVersion": "2026.08.25",
+  "nodes": [
+    {"id": "capture", "operator": "capture.rkmpp", "config": {"reconnectMs": 1000}},
+    {"id": "primary", "operator": "inference.primary", "config": {"releaseId": "release-id"}},
+    {"id": "tracking", "operator": "processing.bytetrack", "config": {"trackBuffer": 30}},
+    {"id": "zlm", "operator": "output.zlm_sei", "config": {"gatewayId": "gateway-id", "streamName": "line-a-result"}}
+  ],
+  "edges": [
+    {"source": "capture", "target": "primary"},
+    {"source": "primary", "target": "tracking"},
+    {"source": "tracking", "target": "zlm"}
+  ]
 }
 ```
 
@@ -137,11 +130,13 @@ The optional task `media` object is converted into independent graph branches:
 access unit is kept beside the decoded frame, so the ZLM branch remuxes the
 original compressed stream and does not encode video again. `tracking` is only
 valid for YOLO detection adapters. Kafka and ZLM consume the same `anhuan_v1`
-JSON envelope after tracking; an empty Kafka key is derived from the last two
-input URI path segments. Both destinations use bounded/retry behavior and do
+JSON envelope from the selected upstream graph node; an empty Kafka key is
+derived from the last two input URI path segments. Both destinations use
+bounded/retry behavior and do
 not stop local JSON or inference when the remote service is down. The platform
-creates `publishUri` from the selected managed gateway and sends it only in the
-node desired state; operators do not enter a complete publication URL.
+creates `publishUri` from the selected managed gateway and sends it only under
+`runtimeBindings.media` in node desired state; graph revisions never contain a
+complete publication URL or credential.
 
 ZLM SEI requires `decoder=rkmpp` because OpenCV capture does not retain the
 original encoded packet. Activation rejects incompatible combinations before

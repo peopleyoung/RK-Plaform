@@ -45,8 +45,6 @@ private:
     bool load_model(const std::string& path, std::vector<rknn_context>& contexts);
     bool query_tensors(rknn_context context);
     bool process(Job& job, rknn_context context);
-    bool decode_flat_output(const float* output, const rknn_tensor_attr& attr, const LetterboxTransform& transform,
-                            int source_width, int source_height, object_meta::FrameTargetList::ptr& targets);
     bool decode_dfl_split_output(const std::vector<rknn_output>& outputs, const LetterboxTransform& transform,
                                  int source_width, int source_height, object_meta::FrameTargetList::ptr& targets);
     bool emit_candidates(std::vector<Candidate>& candidates, object_meta::FrameTargetList::ptr& targets) const;

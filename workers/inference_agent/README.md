@@ -25,11 +25,14 @@ activation that stops the local pipeline.
 The runtime registers ten graph node types: `VideoCaptureNode`,
 `RkMppCaptureNode`, `InferNode`, `ByteTrackNode`, `SecondaryInferNode`,
 `AnalyticsNode`, `EventOutputNode`, `JsonOutputNode`, `KafkaOutputNode`, and
-`ZlmSeiOutputNode`. A desired revision instantiates only the nodes required by
-each task's `media` and `analytics` configuration. RKMPP/ZLM SEI and event
-recording require RTSP input; ByteTrack, area/line analytics, and secondary
-inference are YOLO-only features. JSON, Kafka, and ZLM SEI are independent
-output branches.
+`ZlmSeiOutputNode`. Each desired task contains only the schema-v1 `graph`, its
+immutable `graphRevisionId`/`graphHash`, and node-only `runtimeBindings`. The
+agent rejects descriptors without that contract and compiles the selected DAG
+to runtime YAML. RKMPP/ZLM SEI and event recording require RTSP input;
+ByteTrack, area/line analytics, and secondary inference are YOLO-only features.
+JSON, Kafka, and ZLM SEI are independent output branches. The YOLO runtime only
+accepts `YOLO_DFL_SPLIT`; the old `V5` and flat `ByteTrack` model types are not
+accepted. `ByteTrackNode` remains the tracking operator.
 
 Run on the board:
 

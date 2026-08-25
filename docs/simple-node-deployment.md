@@ -91,7 +91,7 @@ curl -fsS http://172.30.82.12:10081/health
 curl -fsS http://172.30.82.12:10082/health
 ~~~
 
-推理镜像支持 MPP 硬解码、主 RKNN、ByteTrack、二级 YOLO、区域/越线分析、事件抓拍/录像、JSONL/HTTP、Kafka 和 ZLM SEI。任务创建时按 `media` 和 `analytics` 选择分支；不会固定串联全部算子。ZLM SEI 和事件录像要求 RTSP + `decoder=rkmpp`，区域/越线要求 YOLO + ByteTrack，Kafka 与 ZLM 是独立输出分支。详细节点契约见 [runtime-adapter README](../deploy/rk3588/runtime-adapter/README.md)。
+推理镜像支持 MPP 硬解码、主 RKNN、ByteTrack、二级 YOLO、区域/越线分析、事件抓拍/录像、JSONL/HTTP、Kafka 和 ZLM SEI。新建任务时在图编辑器中选择算子并修改默认参数；任务保存为草稿，创建部署批次后才会下发。选择 `capture.rkmpp` 和 `output.zlm_sei` 即可在创建阶段配置 RTSP + SEI，并在 ZLM 算子中选择在线媒体网关。区域/越线要求 YOLO + ByteTrack，Kafka 与 ZLM 是独立输出分支。板端不再接受旧 V5/ByteTrack 模型推理类型，但仍保留 ByteTrack 跟踪算子。详细契约和旧任务清理步骤见 [系统指南](system-guide.md#7-推理图编排)。
 
 ## 5. 故障排查
 

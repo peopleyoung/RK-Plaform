@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import math
-import re
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal, cast
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import Field, field_validator, model_validator
 
 from .api_models import ApiModel
-from .media_contracts import PreviewCapability, TaskMediaConfig
+from .inference_graph import GraphLayout, InferenceGraph
+from .media_contracts import PreviewCapability
 
 
 class TaskType(StrEnum):
@@ -837,387 +837,50 @@ class InferenceNodeHeartbeat(ApiModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class InferenceTaskCreate(ApiModel):
+class InferenceGraphTaskCreate(ApiModel):
     name: str = Field(min_length=1, max_length=120)
-    release_id: str
     node_id: str | None = None
     group_id: str | None = None
     input_uri: str = Field(min_length=1, max_length=2000)
-    interval: int = Field(default=1, ge=1, le=10000)
-    thresholds: dict[str, float] = Field(default_factory=dict)
-    output: dict[str, Any] = Field(default_factory=lambda: {"type": "jsonl"})
-    media: dict[str, Any] = Field(default_factory=dict)
-    analytics: dict[str, Any] = Field(default_factory=dict)
+    graph: InferenceGraph
+    layout: GraphLayout = Field(default_factory=GraphLayout)
     npu_core_mask: NpuCoreMask = NpuCoreMask.AUTO
     npu_core_policy: NpuCorePolicy = NpuCorePolicy.SHARED
-    context_count: int = Field(default=1, ge=1)
-    worker_count: int = Field(default=1, ge=1)
 
     @model_validator(mode="after")
-    def validate_task_placement(self) -> InferenceTaskCreate:
+    def validate_graph_task(self) -> InferenceGraphTaskCreate:
         if bool(self.node_id) == bool(self.group_id):
             raise ValueError("exactly one of nodeId or groupId is required")
-        if self.worker_count > self.context_count:
-            raise ValueError("workerCount must not exceed contextCount")
         if (
             self.npu_core_policy == NpuCorePolicy.EXCLUSIVE
             and self.npu_core_mask == NpuCoreMask.AUTO
         ):
             raise ValueError("exclusive NPU core policy requires an explicit core mask")
-        output_type = self.output.get("type", "jsonl")
-        if output_type == "jsonl":
-            self._validate_media()
-            self._validate_analytics()
-            return self
-        if output_type != "http":
-            raise ValueError("output.type must be jsonl or http")
-        url = self.output.get("url")
-        parsed = urlparse(url) if isinstance(url, str) else None
-        if (
-            parsed is None
-            or parsed.scheme not in {"http", "https"}
-            or not parsed.netloc
-            or parsed.username is not None
-            or parsed.password is not None
-        ):
-            raise ValueError("HTTP output requires an HTTP(S) URL without embedded credentials")
-        connect_timeout = self.output.get("connectTimeoutMs", 1000)
-        request_timeout = self.output.get("requestTimeoutMs", 3000)
-        if (
-            not isinstance(connect_timeout, int)
-            or isinstance(connect_timeout, bool)
-            or not isinstance(request_timeout, int)
-            or isinstance(request_timeout, bool)
-            or not 100 <= connect_timeout <= request_timeout <= 60000
-        ):
+        unknown_positions = set(self.layout.positions) - {node.id for node in self.graph.nodes}
+        if unknown_positions:
             raise ValueError(
-                "output timeouts must satisfy "
-                "100 <= connectTimeoutMs <= requestTimeoutMs <= 60000"
+                f"layout positions reference unknown graph nodes: {sorted(unknown_positions)}"
             )
-        authorization_env = self.output.get("authorizationEnv", "")
-        if not isinstance(authorization_env, str) or (
-            authorization_env
-            and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", authorization_env) is None
-        ):
-            raise ValueError("output.authorizationEnv must be a valid environment name")
-        self._validate_media()
-        self._validate_analytics()
         return self
 
-    def _validate_media(self) -> None:
-        TaskMediaConfig.model_validate(self.media)
-        allowed = {"decoder", "tracking", "kafka", "zlmSei"}
-        unknown = set(self.media) - allowed
-        if unknown:
-            raise ValueError(f"media contains unsupported fields: {sorted(unknown)}")
-        decoder = self.media.get("decoder", "opencv")
-        if decoder not in {"opencv", "rkmpp"}:
-            raise ValueError("media.decoder must be opencv or rkmpp")
-        if decoder == "rkmpp" and not self.input_uri.startswith("rtsp://"):
-            raise ValueError("RKMPP decoder requires an RTSP input")
-        tracking = self.media.get("tracking", {})
-        kafka = self.media.get("kafka", {})
-        zlm = self.media.get("zlmSei", {})
-        if not all(isinstance(item, dict) for item in (tracking, kafka, zlm)):
-            raise ValueError("media tracking, kafka and zlmSei settings must be objects")
-        track_buffer = tracking.get("trackBuffer", 30)
-        queue_messages = kafka.get("queueMessages", 10000)
-        message_timeout = kafka.get("messageTimeoutMs", 3000)
-        reconnect = zlm.get("reconnectMs", 1000)
-        if (
-            not isinstance(track_buffer, int)
-            or isinstance(track_buffer, bool)
-            or not 1 <= track_buffer <= 10000
-        ):
-            raise ValueError("media.tracking.trackBuffer must be between 1 and 10000")
-        if kafka.get("enabled") is True:
-            if not isinstance(kafka.get("brokers"), str) or not kafka.get("brokers", "").strip():
-                raise ValueError("enabled Kafka requires media.kafka.brokers")
-            topic = kafka.get("topic", "sei_msg")
-            if not isinstance(topic, str) or not topic.strip():
-                raise ValueError("enabled Kafka requires media.kafka.topic")
-        if (
-            not isinstance(queue_messages, int)
-            or isinstance(queue_messages, bool)
-            or not 1 <= queue_messages <= 1000000
-        ):
-            raise ValueError("media.kafka.queueMessages must be between 1 and 1000000")
-        if (
-            not isinstance(message_timeout, int)
-            or isinstance(message_timeout, bool)
-            or not 100 <= message_timeout <= 60000
-        ):
-            raise ValueError("media.kafka.messageTimeoutMs must be between 100 and 60000")
-        if zlm.get("enabled") is True and decoder != "rkmpp":
-            raise ValueError("ZLM SEI requires the RKMPP decoder")
-        if (
-            not isinstance(reconnect, int)
-            or isinstance(reconnect, bool)
-            or not 1000 <= reconnect <= 4000
-        ):
-            raise ValueError("media.zlmSei.reconnectMs must be between 1000 and 4000")
 
-    @staticmethod
-    def _validate_normalized_point(value: object, path: str) -> tuple[float, float]:
-        if not isinstance(value, dict):
-            raise ValueError(f"{path} must contain only x and y")
-        point = cast(dict[str, object], value)
-        if set(point) != {"x", "y"}:
-            raise ValueError(f"{path} must contain only x and y")
-        x = point.get("x")
-        y = point.get("y")
-        if (
-            not isinstance(x, (int, float))
-            or isinstance(x, bool)
-            or not isinstance(y, (int, float))
-            or isinstance(y, bool)
-            or not math.isfinite(float(x))
-            or not math.isfinite(float(y))
-            or not 0 <= float(x) <= 1
-            or not 0 <= float(y) <= 1
-        ):
-            raise ValueError(f"{path} coordinates must be finite numbers between 0 and 1")
-        return float(x), float(y)
-
-    @staticmethod
-    def _validate_class_ids(value: object, path: str) -> None:
-        if not isinstance(value, list):
-            raise ValueError(f"{path} must be an array with at most 256 entries")
-        class_ids = cast(list[object], value)
-        if len(class_ids) > 256:
-            raise ValueError(f"{path} must be an array with at most 256 entries")
-        if any(
-            not isinstance(item, int) or isinstance(item, bool) or item < 0
-            for item in class_ids
-        ):
-            raise ValueError(f"{path} entries must be non-negative integers")
-        if len(class_ids) != len(set(class_ids)):
-            raise ValueError(f"{path} must not contain duplicates")
-
-    @staticmethod
-    def _validate_bool_fields(value: dict[str, Any], allowed: set[str], path: str) -> None:
-        unknown = set(value) - allowed
-        if unknown:
-            raise ValueError(f"{path} contains unsupported fields: {sorted(unknown)}")
-        for key, item in value.items():
-            if not isinstance(item, bool):
-                raise ValueError(f"{path}.{key} must be a boolean")
-
-    def _validate_analytics(self) -> None:
-        allowed = {"areas", "lines", "osd", "events", "secondaryModels"}
-        unknown = set(self.analytics) - allowed
-        if unknown:
-            raise ValueError(f"analytics contains unsupported fields: {sorted(unknown)}")
-
-        areas = self.analytics.get("areas", [])
-        lines = self.analytics.get("lines", [])
-        secondary_models = self.analytics.get("secondaryModels", [])
-        osd = self.analytics.get("osd", {})
-        events = self.analytics.get("events", {})
-        if not isinstance(areas, list):
-            raise ValueError("analytics.areas must be an array with at most 32 entries")
-        area_items = cast(list[object], areas)
-        if len(area_items) > 32:
-            raise ValueError("analytics.areas must be an array with at most 32 entries")
-        if not isinstance(lines, list):
-            raise ValueError("analytics.lines must be an array with at most 32 entries")
-        line_items = cast(list[object], lines)
-        if len(line_items) > 32:
-            raise ValueError("analytics.lines must be an array with at most 32 entries")
-        if not isinstance(secondary_models, list):
-            raise ValueError("analytics.secondaryModels must be an array with at most 4 entries")
-        secondary_items = cast(list[object], secondary_models)
-        if len(secondary_items) > 4:
-            raise ValueError("analytics.secondaryModels must be an array with at most 4 entries")
-        if not isinstance(osd, dict) or not isinstance(events, dict):
-            raise ValueError("analytics osd and events settings must be objects")
-        osd_config = cast(dict[str, object], osd)
-        event_config = cast(dict[str, object], events)
-
-        ids: set[str] = set()
-        for index, raw_area in enumerate(area_items):
-            path = f"analytics.areas[{index}]"
-            if not isinstance(raw_area, dict):
-                raise ValueError(f"{path} must be an object")
-            area = cast(dict[str, object], raw_area)
-            unknown_area = set(area) - {
-                "id", "name", "polygon", "classIds", "minCount", "holdFrames"
-            }
-            if unknown_area:
-                raise ValueError(f"{path} contains unsupported fields: {sorted(unknown_area)}")
-            area_id = area.get("id")
-            if not isinstance(area_id, str) or not 1 <= len(area_id.strip()) <= 80:
-                raise ValueError(f"{path}.id must contain between 1 and 80 characters")
-            if area_id in ids:
-                raise ValueError("analytics area and line ids must be unique")
-            ids.add(area_id)
-            name = area.get("name", area_id)
-            if not isinstance(name, str) or not 1 <= len(name.strip()) <= 120:
-                raise ValueError(f"{path}.name must contain between 1 and 120 characters")
-            polygon = area.get("polygon")
-            if not isinstance(polygon, list):
-                raise ValueError(f"{path}.polygon must contain between 3 and 32 points")
-            polygon_points = cast(list[object], polygon)
-            if not 3 <= len(polygon_points) <= 32:
-                raise ValueError(f"{path}.polygon must contain between 3 and 32 points")
-            for point_index, point in enumerate(polygon_points):
-                self._validate_normalized_point(point, f"{path}.polygon[{point_index}]")
-            self._validate_class_ids(area.get("classIds", []), f"{path}.classIds")
-            for field, maximum in (("minCount", 100000), ("holdFrames", 10000)):
-                value = area.get(field, 1)
-                if (
-                    not isinstance(value, int)
-                    or isinstance(value, bool)
-                    or not 1 <= value <= maximum
-                ):
-                    raise ValueError(f"{path}.{field} must be between 1 and {maximum}")
-
-        for index, raw_line in enumerate(line_items):
-            path = f"analytics.lines[{index}]"
-            if not isinstance(raw_line, dict):
-                raise ValueError(f"{path} must be an object")
-            line = cast(dict[str, object], raw_line)
-            unknown_line = set(line) - {"id", "name", "start", "end", "direction", "classIds"}
-            if unknown_line:
-                raise ValueError(f"{path} contains unsupported fields: {sorted(unknown_line)}")
-            line_id = line.get("id")
-            if not isinstance(line_id, str) or not 1 <= len(line_id.strip()) <= 80:
-                raise ValueError(f"{path}.id must contain between 1 and 80 characters")
-            if line_id in ids:
-                raise ValueError("analytics area and line ids must be unique")
-            ids.add(line_id)
-            name = line.get("name", line_id)
-            if not isinstance(name, str) or not 1 <= len(name.strip()) <= 120:
-                raise ValueError(f"{path}.name must contain between 1 and 120 characters")
-            start = self._validate_normalized_point(line.get("start"), f"{path}.start")
-            end = self._validate_normalized_point(line.get("end"), f"{path}.end")
-            if start == end:
-                raise ValueError(f"{path} start and end must differ")
-            if line.get("direction", "both") not in {"both", "a_to_b", "b_to_a"}:
-                raise ValueError(f"{path}.direction must be both, a_to_b or b_to_a")
-            self._validate_class_ids(line.get("classIds", []), f"{path}.classIds")
-
-        self._validate_bool_fields(
-            osd_config,
-            {
-                "enabled", "showLabels", "showConfidence", "showTrackId",
-                "showAreas", "showLines",
-            },
-            "analytics.osd",
-        )
-        unknown_events = set(event_config) - {
-            "enabled", "snapshot", "record", "preSeconds", "postSeconds", "retentionDays"
-        }
-        if unknown_events:
-            raise ValueError(
-                f"analytics.events contains unsupported fields: {sorted(unknown_events)}"
-            )
-        for field in ("enabled", "snapshot", "record"):
-            if field in event_config and not isinstance(event_config[field], bool):
-                raise ValueError(f"analytics.events.{field} must be a boolean")
-        for field, minimum, maximum, default in (
-            ("preSeconds", 0, 60, 3),
-            ("postSeconds", 0, 300, 5),
-            ("retentionDays", 1, 3650, 30),
-        ):
-            value = event_config.get(field, default)
-            if (
-                not isinstance(value, int)
-                or isinstance(value, bool)
-                or not minimum <= value <= maximum
-            ):
-                raise ValueError(
-                    f"analytics.events.{field} must be between {minimum} and {maximum}"
-                )
-        if event_config.get("enabled") is True:
-            if not area_items and not line_items:
-                raise ValueError("enabled analytics events require at least one area or line")
-            if (
-                event_config.get("snapshot", True) is not True
-                and event_config.get("record", False) is not True
-            ):
-                raise ValueError("enabled analytics events require snapshot or record output")
-        if (
-            event_config.get("record") is True
-            and self.media.get("decoder", "opencv") != "rkmpp"
-        ):
-            raise ValueError("analytics event recording requires the RKMPP decoder")
-
-        secondary_release_ids: set[str] = set()
-        for index, raw_secondary in enumerate(secondary_items):
-            path = f"analytics.secondaryModels[{index}]"
-            if not isinstance(raw_secondary, dict):
-                raise ValueError(f"{path} must be an object")
-            secondary = cast(dict[str, object], raw_secondary)
-            unknown_secondary = set(secondary) - {
-                "releaseId",
-                "sourceClassIds",
-                "confidenceThreshold",
-                "contextCount",
-                "workerCount",
-            }
-            if unknown_secondary:
-                raise ValueError(
-                    f"{path} contains unsupported fields: {sorted(unknown_secondary)}"
-                )
-            release_id = secondary.get("releaseId")
-            if not isinstance(release_id, str) or not release_id.strip():
-                raise ValueError(f"{path}.releaseId is required")
-            if release_id in secondary_release_ids:
-                raise ValueError("analytics.secondaryModels releaseId values must be unique")
-            secondary_release_ids.add(release_id)
-            self._validate_class_ids(
-                secondary.get("sourceClassIds", []), f"{path}.sourceClassIds"
-            )
-            threshold = secondary.get("confidenceThreshold", 0.25)
-            if (
-                not isinstance(threshold, (int, float))
-                or isinstance(threshold, bool)
-                or not math.isfinite(float(threshold))
-                or not 0 <= float(threshold) <= 1
-            ):
-                raise ValueError(f"{path}.confidenceThreshold must be between 0 and 1")
-            context_count = secondary.get("contextCount", 1)
-            worker_count = secondary.get("workerCount", 1)
-            if (
-                not isinstance(context_count, int)
-                or isinstance(context_count, bool)
-                or context_count < 1
-            ):
-                raise ValueError(f"{path}.contextCount must be a positive integer")
-            if (
-                not isinstance(worker_count, int)
-                or isinstance(worker_count, bool)
-                or worker_count < 1
-            ):
-                raise ValueError(f"{path}.workerCount must be a positive integer")
-            if worker_count > context_count:
-                raise ValueError(f"{path}.workerCount must not exceed contextCount")
-            secondary["contextCount"] = context_count
-            secondary["workerCount"] = worker_count
-
-
-class InferenceTaskUpdate(InferenceTaskCreate):
-    pass
+class InferenceTaskUpdate(InferenceGraphTaskCreate):
+    base_revision_id: str = Field(min_length=1, max_length=48)
 
 
 class InferenceTaskResponse(ApiModel):
     id: str
     name: str
     status: InferenceTaskStatus
-    release_id: str
     node_id: str
     group_id: str | None
     input_uri: str
-    interval: int
-    thresholds: dict[str, float]
-    output: dict[str, Any]
-    media: dict[str, Any]
-    analytics: dict[str, Any]
+    graph: InferenceGraph
+    layout: GraphLayout
+    graph_revision_id: str
+    graph_hash: str
     npu_core_mask: NpuCoreMask
     npu_core_policy: NpuCorePolicy
-    context_count: int
-    worker_count: int
     preview_capability: PreviewCapability
     config_revision: int
     error_message: str | None
@@ -1227,6 +890,15 @@ class InferenceTaskResponse(ApiModel):
 
 class InferenceTaskListResponse(PageInfo):
     items: list[InferenceTaskResponse]
+
+
+class InferenceGraphRevisionResponse(ApiModel):
+    id: str
+    task_id: str
+    revision: int
+    graph: InferenceGraph
+    graph_hash: str
+    created_at: datetime
 
 
 class InferencePlaybackSessionResponse(ApiModel):
@@ -1243,7 +915,6 @@ class InferencePlaybackSessionResponse(ApiModel):
 
 class DeploymentCreate(ApiModel):
     name: str = Field(min_length=1, max_length=120)
-    release_id: str
     task_ids: list[str] = Field(min_length=1, max_length=1000)
     strategy: Literal["canary", "rolling", "all_at_once"] = "rolling"
     batch_size: int = Field(default=1, ge=1, le=100)
@@ -1261,8 +932,8 @@ class DeploymentTargetResponse(ApiModel):
     deployment_id: str
     node_id: str
     task_id: str
-    release_id: str
-    previous_release_id: str | None
+    graph_revision_id: str
+    graph_hash: str
     sequence: int
     desired_revision: int
     state: DeploymentTargetState
@@ -1279,7 +950,6 @@ class DeploymentResponse(ApiModel):
     id: str
     name: str
     status: DeploymentStatus
-    release_id: str
     strategy: str
     batch_size: int
     targets: list[DeploymentTargetResponse]
@@ -1324,19 +994,15 @@ class AgentReleaseDescriptor(ApiModel):
 class AgentTaskDescriptor(ApiModel):
     id: str
     name: str
-    release_id: str
     deployment_target_id: str | None
     input_uri: str
-    interval: int
-    thresholds: dict[str, float]
-    output: dict[str, Any]
-    media: dict[str, Any]
-    analytics: dict[str, Any]
+    graph: InferenceGraph
+    graph_revision_id: str
+    graph_hash: str
+    runtime_bindings: dict[str, Any] = Field(default_factory=dict)
     npu_core_mask: NpuCoreMask
     npu_core_policy: NpuCorePolicy
     config_revision: int = Field(default=0, ge=0)
-    context_count: int = 1
-    worker_count: int = 1
 
 
 class AgentDesiredState(ApiModel):

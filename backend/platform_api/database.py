@@ -56,6 +56,10 @@ class Database:
             "context_count": "INTEGER NOT NULL DEFAULT 1",
             "worker_count": "INTEGER NOT NULL DEFAULT 1",
             "media_migration_required": "BOOLEAN NOT NULL DEFAULT 0",
+            "graph_json": "JSON NOT NULL DEFAULT '{}'",
+            "graph_layout_json": "JSON NOT NULL DEFAULT '{}'",
+            "graph_revision_id": "VARCHAR(48)",
+            "graph_hash": "VARCHAR(64) NOT NULL DEFAULT ''",
         }
         with self.engine.begin() as connection:
             for name, definition in missing_inference_columns.items():
@@ -73,13 +77,26 @@ class Database:
                 for task in tasks:
                     media = task.media_json or {}
                     raw_zlm: object = media.get("zlmSei")
-                    zlm = (
-                        cast(dict[str, object], raw_zlm)
-                        if isinstance(raw_zlm, dict)
-                        else {}
-                    )
+                    zlm = cast(dict[str, object], raw_zlm) if isinstance(raw_zlm, dict) else {}
                     task.media_migration_required = bool(
                         zlm.get("outputUri") and not zlm.get("gatewayId")
+                    )
+        target_columns = {
+            column["name"] for column in inspect(self.engine).get_columns("deployment_targets")
+        }
+        missing_target_columns = {
+            "graph_revision_id": "VARCHAR(48)",
+            "graph_snapshot_json": "JSON NOT NULL DEFAULT '{}'",
+            "graph_hash": "VARCHAR(64) NOT NULL DEFAULT ''",
+            "previous_graph_revision_id": "VARCHAR(48)",
+            "previous_graph_snapshot_json": "JSON NOT NULL DEFAULT '{}'",
+            "previous_graph_hash": "VARCHAR(64) NOT NULL DEFAULT ''",
+        }
+        with self.engine.begin() as connection:
+            for name, definition in missing_target_columns.items():
+                if name not in target_columns:
+                    connection.execute(
+                        text(f"ALTER TABLE deployment_targets ADD COLUMN {name} {definition}")
                     )
         endpoint_columns = {
             column["name"] for column in inspect(self.engine).get_columns("service_endpoints")

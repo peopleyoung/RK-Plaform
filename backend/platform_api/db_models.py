@@ -81,9 +81,7 @@ class ServiceEndpointRecord(Base):
     capabilities_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     token_configured: Mapped[bool] = mapped_column(Boolean, default=False)
-    enrollment_status: Mapped[str] = mapped_column(
-        String(20), default="enrolled", index=True
-    )
+    enrollment_status: Mapped[str] = mapped_column(String(20), default="enrolled", index=True)
     enrollment_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     enrollment_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -91,9 +89,7 @@ class ServiceEndpointRecord(Base):
     enrollment_claimed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    enrolled_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    enrolled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     probe_status: Mapped[str] = mapped_column(String(30), default="unprobed", index=True)
     last_probe_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -107,9 +103,7 @@ class ServiceEndpointRecord(Base):
 
 class NodeCleanupRecord(Base):
     __tablename__ = "node_cleanups"
-    __table_args__ = (
-        UniqueConstraint("endpoint_id", "job_id", name="uq_node_cleanup_job"),
-    )
+    __table_args__ = (UniqueConstraint("endpoint_id", "job_id", name="uq_node_cleanup_job"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     endpoint_id: Mapped[str] = mapped_column(String(36), index=True)
@@ -284,12 +278,32 @@ class InferenceTaskRecord(Base):
     context_count: Mapped[int] = mapped_column(Integer, default=1)
     worker_count: Mapped[int] = mapped_column(Integer, default=1)
     media_migration_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    graph_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    graph_layout_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    graph_revision_id: Mapped[str | None] = mapped_column(String(48), nullable=True, index=True)
+    graph_hash: Mapped[str] = mapped_column(String(64), default="", index=True)
     config_revision: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
+
+
+class InferenceGraphRevisionRecord(Base):
+    __tablename__ = "inference_graph_revisions"
+    __table_args__ = (
+        UniqueConstraint("task_id", "revision", name="uq_inference_graph_task_revision"),
+    )
+
+    id: Mapped[str] = mapped_column(String(48), primary_key=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("inference_tasks.id"), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    schema_version: Mapped[int] = mapped_column(Integer)
+    catalog_version: Mapped[str] = mapped_column(String(40))
+    graph_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    graph_hash: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class MediaGatewayRecord(Base):
@@ -384,6 +398,12 @@ class DeploymentTargetRecord(Base):
     previous_release_id: Mapped[str | None] = mapped_column(
         ForeignKey("model_releases.id"), nullable=True
     )
+    graph_revision_id: Mapped[str | None] = mapped_column(String(48), nullable=True, index=True)
+    graph_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    graph_hash: Mapped[str] = mapped_column(String(64), default="", index=True)
+    previous_graph_revision_id: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    previous_graph_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    previous_graph_hash: Mapped[str] = mapped_column(String(64), default="")
     previous_task_status: Mapped[str] = mapped_column(String(30))
     sequence: Mapped[int] = mapped_column(Integer)
     desired_revision: Mapped[int] = mapped_column(Integer, default=0)

@@ -40,6 +40,19 @@ ADAPTERS: dict[str, tuple[str, str, str]] = {
         "ppocr_ctc_logits_v1",
     ),
 }
+GRAPH_OPERATORS = {
+    "capture.opencv",
+    "capture.rkmpp",
+    "inference.primary",
+    "processing.bytetrack",
+    "inference.secondary",
+    "processing.analytics",
+    "processing.events",
+    "output.json",
+    "output.kafka",
+    "output.zlm_sei",
+}
+GRAPH_CATALOG_VERSION = "2026.08.25"
 
 NPU_CORE_BITS: dict[str, int] = {
     "auto": 0b111,
@@ -106,28 +119,7 @@ def _load_object(path: Path) -> dict[str, Any]:
 def _load_release_configs() -> list[dict[str, Any]]:
     raw = os.environ.get("RKNODE_RELEASE_CONFIGS", "")
     if not raw:
-        release_id = os.environ.get("RKNODE_RELEASE_ID", "")
-        model_path = os.environ.get("RKNODE_MODEL_PATH", "")
-        manifest_path = os.environ.get("RKNODE_MANIFEST_PATH", "")
-        adapter = os.environ.get("RKNODE_ADAPTER", "")
-        tasks_raw = os.environ.get("RKNODE_TASK_CONFIGS", "[]")
-        if not release_id and not model_path and not manifest_path:
-            return []
-        try:
-            tasks_value: object = json.loads(tasks_raw)
-        except ValueError as error:
-            raise RuntimeAdapterError(f"RKNODE_TASK_CONFIGS is invalid JSON: {error}") from error
-        raw = json.dumps(
-            [
-                {
-                    "releaseId": release_id,
-                    "adapter": adapter,
-                    "modelPath": model_path,
-                    "manifestPath": manifest_path,
-                    "tasks": tasks_value,
-                }
-            ]
-        )
+        raise RuntimeAdapterError("RKNODE_RELEASE_CONFIGS is required")
     try:
         value: object = json.loads(raw)
     except ValueError as error:
@@ -157,8 +149,171 @@ def _tasks_for(config: dict[str, Any]) -> list[dict[str, Any]]:
     for item in cast(list[object], value):
         if not isinstance(item, dict):
             raise RuntimeAdapterError("Every task descriptor must be a JSON object")
-        tasks.append(cast(dict[str, Any], item))
+        tasks.append(_compile_graph_task(cast(dict[str, Any], item)))
     return tasks
+
+
+def _compile_graph_task(task: dict[str, Any]) -> dict[str, Any]:
+    task_id = str(task.get("id", "<missing>"))
+    graph_value = task.get("graph")
+    if not isinstance(graph_value, dict):
+        raise RuntimeAdapterError(f"Task {task_id} is missing graph contract")
+    graph = cast(dict[str, Any], graph_value)
+    if graph.get("schemaVersion") != 1 or graph.get("catalogVersion") != GRAPH_CATALOG_VERSION:
+        raise RuntimeAdapterError(f"Task {task_id} graph contract version is unsupported")
+    nodes_value = graph.get("nodes")
+    edges_value = graph.get("edges", [])
+    if not isinstance(nodes_value, list) or not isinstance(edges_value, list):
+        raise RuntimeAdapterError(f"Task {task_id} graph nodes/edges must be arrays")
+    nodes: dict[str, dict[str, Any]] = {}
+    for value in cast(list[object], nodes_value):
+        if not isinstance(value, dict):
+            raise RuntimeAdapterError(f"Task {task_id} graph node must be an object")
+        node = cast(dict[str, Any], value)
+        node_id = node.get("id")
+        operator = node.get("operator")
+        config_value = node.get("config", {})
+        if (
+            not isinstance(node_id, str)
+            or not node_id
+            or node_id in nodes
+            or operator not in GRAPH_OPERATORS
+            or not isinstance(config_value, dict)
+        ):
+            raise RuntimeAdapterError(f"Task {task_id} contains an invalid graph node")
+        nodes[node_id] = {
+            "id": node_id,
+            "operator": operator,
+            "config": cast(dict[str, Any], config_value),
+        }
+    incoming: dict[str, str] = {}
+    outgoing: dict[str, list[str]] = {node_id: [] for node_id in nodes}
+    indegree = {node_id: 0 for node_id in nodes}
+    for value in cast(list[object], edges_value):
+        if not isinstance(value, dict):
+            raise RuntimeAdapterError(f"Task {task_id} graph edge must be an object")
+        edge = cast(dict[str, Any], value)
+        source = edge.get("source")
+        target = edge.get("target")
+        if not isinstance(source, str) or not isinstance(target, str):
+            raise RuntimeAdapterError(f"Task {task_id} graph edge endpoints are invalid")
+        if source not in nodes or target not in nodes or target in incoming:
+            raise RuntimeAdapterError(f"Task {task_id} graph topology is invalid")
+        incoming[target] = source
+        outgoing[source].append(target)
+        indegree[target] += 1
+    queue = sorted(node_id for node_id, count in indegree.items() if count == 0)
+    ordered_ids: list[str] = []
+    while queue:
+        current = queue.pop(0)
+        ordered_ids.append(current)
+        for child in sorted(outgoing[current]):
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                queue.append(child)
+                queue.sort()
+    if len(ordered_ids) != len(nodes):
+        raise RuntimeAdapterError(f"Task {task_id} graph contains a cycle")
+
+    def selected(operator: str) -> list[dict[str, Any]]:
+        return [nodes[node_id] for node_id in ordered_ids if nodes[node_id]["operator"] == operator]
+
+    captures = selected("capture.opencv") + selected("capture.rkmpp")
+    primaries = selected("inference.primary")
+    outputs = [node for node in nodes.values() if str(node["operator"]).startswith("output.")]
+    if len(captures) != 1 or len(primaries) != 1 or not outputs:
+        raise RuntimeAdapterError(
+            f"Task {task_id} graph requires one capture, one primary and an output"
+        )
+    primary = primaries[0]
+    primary_config = cast(dict[str, Any], primary["config"])
+    runtime_bindings_value = task.get("runtimeBindings", {})
+    runtime_bindings = (
+        cast(dict[str, Any], runtime_bindings_value)
+        if isinstance(runtime_bindings_value, dict)
+        else {}
+    )
+    bound_media_value = runtime_bindings.get("media", {})
+    bound_media = (
+        cast(dict[str, Any], bound_media_value) if isinstance(bound_media_value, dict) else {}
+    )
+    media = dict(bound_media)
+    media["decoder"] = "rkmpp" if captures[0]["operator"] == "capture.rkmpp" else "opencv"
+    tracking_nodes = selected("processing.bytetrack")
+    media["tracking"] = {
+        "enabled": bool(tracking_nodes),
+        **(cast(dict[str, Any], tracking_nodes[0]["config"]) if tracking_nodes else {}),
+    }
+    kafka_nodes = selected("output.kafka")
+    media["kafka"] = {
+        **(
+            cast(dict[str, Any], bound_media.get("kafka", {}))
+            if isinstance(bound_media.get("kafka"), dict)
+            else {}
+        ),
+        "enabled": bool(kafka_nodes),
+        **(cast(dict[str, Any], kafka_nodes[0]["config"]) if kafka_nodes else {}),
+    }
+    zlm_nodes = selected("output.zlm_sei")
+    media["zlmSei"] = {
+        **(
+            cast(dict[str, Any], bound_media.get("zlmSei", {}))
+            if isinstance(bound_media.get("zlmSei"), dict)
+            else {}
+        ),
+        "enabled": bool(zlm_nodes),
+        **(cast(dict[str, Any], zlm_nodes[0]["config"]) if zlm_nodes else {}),
+    }
+    analytics_nodes = selected("processing.analytics")
+    analytics = dict(cast(dict[str, Any], analytics_nodes[0]["config"])) if analytics_nodes else {}
+    event_nodes = selected("processing.events")
+    if event_nodes:
+        analytics["events"] = cast(dict[str, Any], event_nodes[0]["config"])
+    secondary_nodes = selected("inference.secondary")
+    analytics["secondaryModels"] = [
+        {
+            **cast(dict[str, Any], node["config"]),
+            "confidenceThreshold": cast(dict[str, Any], node["config"]).get("confidence", 0.25),
+        }
+        for node in secondary_nodes
+    ]
+    json_nodes = selected("output.json")
+    output = (
+        dict(cast(dict[str, Any], json_nodes[0]["config"])) if json_nodes else {"type": "disabled"}
+    )
+    graph_plan = {
+        "captureId": captures[0]["id"],
+        "captureConfig": captures[0]["config"],
+        "primaryId": primary["id"],
+        "trackingId": tracking_nodes[0]["id"] if tracking_nodes else None,
+        "secondaryIds": [node["id"] for node in secondary_nodes],
+        "analyticsId": analytics_nodes[0]["id"] if analytics_nodes else None,
+        "eventsId": event_nodes[0]["id"] if event_nodes else None,
+        "incoming": incoming,
+        "outputIds": {node["operator"]: node["id"] for node in outputs},
+    }
+    return {
+        **task,
+        "releaseId": primary_config.get("releaseId"),
+        "interval": primary_config.get("interval", 1),
+        "thresholds": {
+            "confidence": primary_config.get("confidence", 0.4),
+            "nms": primary_config.get("nms", 0.5),
+        },
+        "output": output,
+        "media": media,
+        "analytics": analytics,
+        "contextCount": primary_config.get("contextCount", 1),
+        "workerCount": primary_config.get("workerCount", 1),
+        "_graphPlan": graph_plan,
+    }
+
+
+def _task_graph_plan(task: dict[str, Any]) -> dict[str, Any]:
+    value = task.get("_graphPlan")
+    if not isinstance(value, dict):
+        raise RuntimeAdapterError(f"Task {task.get('id', '<missing>')} graph plan was not compiled")
+    return cast(dict[str, Any], value)
 
 
 def _task_output(task: dict[str, Any]) -> dict[str, Any]:
@@ -167,6 +322,8 @@ def _task_output(task: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeAdapterError(f"Task {task.get('id', '<missing>')} output must be an object")
     output = cast(dict[str, Any], value)
     output_type = str(output.get("type", "jsonl"))
+    if output_type == "disabled":
+        return {"type": "disabled"}
     if output_type == "jsonl":
         return {"type": "jsonl"}
     if output_type != "http":
@@ -264,9 +421,7 @@ def _task_media(task: dict[str, Any], adapter: str) -> dict[str, Any]:
             f"Task {task_id} ZLM SEI publishUri must be an RTSP URL without userinfo"
         )
     if not 1000 <= reconnect_ms <= 4000:
-        raise RuntimeAdapterError(
-            f"Task {task_id} ZLM reconnectMs must be between 1000 and 4000"
-        )
+        raise RuntimeAdapterError(f"Task {task_id} ZLM reconnectMs must be between 1000 and 4000")
     return {
         "decoder": decoder,
         "tracking": {"enabled": tracking_enabled, "track_buffer": track_buffer},
@@ -312,9 +467,7 @@ def _task_analytics(
     osd = cast(dict[str, Any], osd_value)
     events = cast(dict[str, Any], events_value)
     if (areas or lines or secondary_value) and not adapter.startswith("yolo_"):
-        raise RuntimeAdapterError(
-            f"Task {task_id} analytics requires a detection adapter"
-        )
+        raise RuntimeAdapterError(f"Task {task_id} analytics requires a detection adapter")
     media = _task_media(task, adapter)
     if (areas or lines) and not media["tracking"]["enabled"]:
         raise RuntimeAdapterError(f"Task {task_id} area/line analytics requires tracking")
@@ -387,9 +540,7 @@ def _task_analytics(
 
 def _task_npu_config(task: dict[str, Any]) -> tuple[str, str]:
     mask = str(task.get("npuCoreMask", task.get("npu_core_mask", "auto"))).strip().lower()
-    policy = str(
-        task.get("npuCorePolicy", task.get("npu_core_policy", "shared"))
-    ).strip().lower()
+    policy = str(task.get("npuCorePolicy", task.get("npu_core_policy", "shared"))).strip().lower()
     if mask not in NPU_CORE_BITS:
         raise RuntimeAdapterError(
             f"Task {task.get('id', '<missing>')} has unsupported NPU core mask {mask}"
@@ -409,17 +560,9 @@ def _task_npu_config(task: dict[str, Any]) -> tuple[str, str]:
 def _pool_config(config: dict[str, Any], owner: str) -> tuple[int, int]:
     context_count = config.get("contextCount", config.get("context_count", 1))
     worker_count = config.get("workerCount", config.get("worker_count", 1))
-    if (
-        not isinstance(context_count, int)
-        or isinstance(context_count, bool)
-        or context_count < 1
-    ):
+    if not isinstance(context_count, int) or isinstance(context_count, bool) or context_count < 1:
         raise RuntimeAdapterError(f"{owner} contextCount must be a positive integer")
-    if (
-        not isinstance(worker_count, int)
-        or isinstance(worker_count, bool)
-        or worker_count < 1
-    ):
+    if not isinstance(worker_count, int) or isinstance(worker_count, bool) or worker_count < 1:
         raise RuntimeAdapterError(f"{owner} workerCount must be a positive integer")
     if worker_count > context_count:
         raise RuntimeAdapterError(f"{owner} workerCount must not exceed contextCount")
@@ -428,9 +571,7 @@ def _pool_config(config: dict[str, Any], owner: str) -> tuple[int, int]:
 
 def _task_runtime_key(task: dict[str, Any], release_id: str, adapter: str) -> str:
     mask, policy = _task_npu_config(task)
-    context_count, worker_count = _pool_config(
-        task, f"Task {task.get('id', '<missing>')}"
-    )
+    context_count, worker_count = _pool_config(task, f"Task {task.get('id', '<missing>')}")
     return json.dumps(
         {
             "releaseId": release_id,
@@ -491,9 +632,7 @@ def _validate_release(config: dict[str, Any]) -> tuple[dict[str, Any], list[dict
 def validate_release_configs(configs: list[dict[str, Any]]) -> None:
     release_ids: set[str] = set()
     task_ids: set[str] = set()
-    runtime_groups: dict[
-        tuple[str, str, str, str, str, str, int, int], list[str]
-    ] = {}
+    runtime_groups: dict[tuple[str, str, str, str, str, str, int, int], list[str]] = {}
     releases = {str(config.get("releaseId", "")): config for config in configs}
     for config in configs:
         release_id = str(config.get("releaseId", ""))
@@ -594,9 +733,7 @@ def _instance_config(
     core_mask, core_policy = _task_npu_config(task)
     result["core_mask"] = core_mask
     result["core_policy"] = core_policy
-    context_count, worker_count = _pool_config(
-        task, f"Task {task.get('id', '<missing>')}"
-    )
+    context_count, worker_count = _pool_config(task, f"Task {task.get('id', '<missing>')}")
     result["context_count"] = context_count
     result["worker_count"] = worker_count
     result["queue_capacity"] = max(8, worker_count * 2)
@@ -633,12 +770,14 @@ def _canonical_thresholds(task: dict[str, Any]) -> str:
     return json.dumps(thresholds, sort_keys=True, separators=(",", ":"))
 
 
-def _task_revision(task: dict[str, Any], node_revision: int) -> int:
-    """Use the task revision for result envelopes, with legacy fallback."""
-    value = task.get("configRevision", task.get("config_revision"))
+def _task_revision(task: dict[str, Any]) -> int:
+    """Use the immutable desired-state revision for result envelopes."""
+    value = task.get("configRevision")
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return value
-    return node_revision
+    raise RuntimeAdapterError(
+        f"Task {task.get('id', '<missing>')} is missing configRevision"
+    )
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -712,7 +851,7 @@ def prepare_revision(
                 instance_names.append(instance_name)
                 for task in group_tasks:
                     task_id = str(task["id"])
-                    task_revision = _task_revision(task, revision)
+                    task_revision = _task_revision(task)
                     task_slug = _safe_name(task_id, "task")[:60]
                     pipeline_name = _safe_name(
                         f"{task_slug}-{hashlib.sha256(task_id.encode()).hexdigest()[:8]}",
@@ -722,37 +861,44 @@ def prepare_revision(
                     output = _task_output(task)
                     media = _task_media(task, adapter)
                     analytics = _task_analytics(task, adapter, release_lookup)
-                    sink: str | dict[str, Any]
+                    graph_plan = _task_graph_plan(task)
+                    incoming = cast(dict[str, str], graph_plan["incoming"])
+                    aliases: dict[str, str] = {
+                        str(graph_plan["captureId"]): "capture",
+                        str(graph_plan["primaryId"]): "infer",
+                    }
+                    sink: str | dict[str, Any] | None = None
                     if output["type"] == "http":
                         sink = output
-                    else:
+                    elif output["type"] == "jsonl":
                         sink = str(output_root / f"{pipeline_name}.jsonl")
-                        task_outputs.append(
-                            {"taskId": task_id, "type": "jsonl", "path": sink}
-                        )
+                        task_outputs.append({"taskId": task_id, "type": "jsonl", "path": sink})
                     capture_node = (
-                        "RkMppCaptureNode"
-                        if media["decoder"] == "rkmpp"
-                        else "VideoCaptureNode"
+                        "RkMppCaptureNode" if media["decoder"] == "rkmpp" else "VideoCaptureNode"
                     )
-                    result_upstream = "infer"
+                    capture_config = cast(dict[str, Any], graph_plan["captureConfig"])
                     pipeline: dict[str, Any] = {
                         "inputs": [str(task["inputUri"])],
-                        "capture": {"node": capture_node, "loop": True, "reconnect_ms": 1000},
+                        "capture": {
+                            "node": capture_node,
+                            "loop": capture_config.get("loop", True),
+                            "reconnect_ms": capture_config.get("reconnectMs", 1000),
+                        },
                         "infer": {
                             "node": "InferNode",
                             "instance": instance_name,
                             "interval": interval,
-                            "link_to": ["capture"],
+                            "link_to": [aliases[incoming[str(graph_plan["primaryId"])]]],
                         },
                     }
                     if media["tracking"]["enabled"]:
+                        tracking_id = str(graph_plan["trackingId"])
                         pipeline["tracking"] = {
                             "node": "ByteTrackNode",
                             "track_buffer": media["tracking"]["track_buffer"],
-                            "link_to": ["infer"],
+                            "link_to": [aliases[incoming[tracking_id]]],
                         }
-                        result_upstream = "tracking"
+                        aliases[tracking_id] = "tracking"
                     for secondary_index, secondary in enumerate(analytics["secondary_models"]):
                         secondary_release_id = str(secondary["release_id"])
                         secondary_config = release_lookup[secondary_release_id]
@@ -772,9 +918,9 @@ def prepare_revision(
                         )
                         secondary_instance = secondary_instances.get(secondary_key)
                         if secondary_instance is None:
-                            secondary_slug = _safe_name(
-                                secondary_release_id, "secondary-release"
-                            )[:40]
+                            secondary_slug = _safe_name(secondary_release_id, "secondary-release")[
+                                :40
+                            ]
                             secondary_instance = _safe_name(
                                 f"secondary-{secondary_slug}-"
                                 f"{hashlib.sha256(secondary_key.encode()).hexdigest()[:8]}",
@@ -789,26 +935,29 @@ def prepare_revision(
                             instance_names.append(secondary_instance)
                             secondary_instances[secondary_key] = secondary_instance
                         node_name = f"secondary_{secondary_index}"
+                        secondary_id = str(graph_plan["secondaryIds"][secondary_index])
                         pipeline[node_name] = {
                             "node": "SecondaryInferNode",
                             "instance": secondary_instance,
                             "primary_instance": instance_name,
                             "source_class_ids": secondary["source_class_ids"],
                             "confidence_threshold": secondary["confidence_threshold"],
-                            "link_to": [result_upstream],
+                            "link_to": [aliases[incoming[secondary_id]]],
                         }
-                        result_upstream = node_name
-                    if analytics["areas"] or analytics["lines"]:
+                        aliases[secondary_id] = node_name
+                    if graph_plan["analyticsId"] is not None:
+                        analytics_id = str(graph_plan["analyticsId"])
                         pipeline["analytics"] = {
                             "node": "AnalyticsNode",
                             "task_id": task_id,
                             "primary_instance": instance_name,
                             "areas": analytics["areas"],
                             "lines": analytics["lines"],
-                            "link_to": [result_upstream],
+                            "link_to": [aliases[incoming[analytics_id]]],
                         }
-                        result_upstream = "analytics"
+                        aliases[analytics_id] = "analytics"
                     if analytics["events"]["enabled"]:
+                        events_id = str(graph_plan["eventsId"])
                         event_root = output_root / "events" / pipeline_name
                         task_outputs.append(
                             {"taskId": task_id, "type": "events", "path": str(event_root)}
@@ -818,18 +967,22 @@ def prepare_revision(
                             "task_id": task_id,
                             "output": str(event_root),
                             **analytics["events"],
-                            "link_to": [result_upstream],
+                            "link_to": [aliases[incoming[events_id]]],
                         }
-                        result_upstream = "events"
-                    pipeline["result"] = {
-                        "node": "JsonOutputNode",
-                        "instance": instance_name,
-                        "task_id": task_id,
-                        "revision": task_revision,
-                        "output": sink,
-                        "link_to": [result_upstream],
-                    }
+                        aliases[events_id] = "events"
+                    output_ids = cast(dict[str, str], graph_plan["outputIds"])
+                    if sink is not None:
+                        result_id = output_ids["output.json"]
+                        pipeline["result"] = {
+                            "node": "JsonOutputNode",
+                            "instance": instance_name,
+                            "task_id": task_id,
+                            "revision": task_revision,
+                            "output": sink,
+                            "link_to": [aliases[incoming[result_id]]],
+                        }
                     if media["kafka"]["enabled"]:
+                        kafka_id = output_ids["output.kafka"]
                         kafka_config = {
                             "node": "KafkaOutputNode",
                             "input": str(task["inputUri"]),
@@ -840,12 +993,13 @@ def prepare_revision(
                             "topic": media["kafka"]["topic"],
                             "queue_messages": media["kafka"]["queue_messages"],
                             "message_timeout_ms": media["kafka"]["message_timeout_ms"],
-                            "link_to": [result_upstream],
+                            "link_to": [aliases[incoming[kafka_id]]],
                         }
                         if media["kafka"]["key"]:
                             kafka_config["key"] = media["kafka"]["key"]
                         pipeline["kafka"] = kafka_config
                     if media["zlm_sei"]["enabled"]:
+                        zlm_id = output_ids["output.zlm_sei"]
                         pipeline["zlm_sei"] = {
                             "node": "ZlmSeiOutputNode",
                             "output": media["zlm_sei"]["output"],
@@ -853,7 +1007,7 @@ def prepare_revision(
                             "task_id": task_id,
                             "revision": task_revision,
                             "reconnect_ms": media["zlm_sei"]["reconnect_ms"],
-                            "link_to": [result_upstream],
+                            "link_to": [aliases[incoming[zlm_id]]],
                         }
                     _write_json(temporary / "pipelines" / f"{pipeline_name}.yaml", pipeline)
         _write_json(temporary / "instances.yaml", instances)
@@ -876,8 +1030,7 @@ def prepare_revision(
                 "taskCount": sum(len(_tasks_for(config)) for config in configs),
                 "instances": instance_names,
                 "contextCount": sum(
-                    int(instance.get("context_count", 1))
-                    for instance in instances.values()
+                    int(instance.get("context_count", 1)) for instance in instances.values()
                 ),
                 "instancePools": [
                     {
@@ -1078,9 +1231,7 @@ def command_self_test() -> None:
         [str(_protocol_probe_binary())], check=False, timeout=10, capture_output=True, text=True
     )
     if protocol_probe.returncode != 0:
-        raise RuntimeAdapterError(
-            f"Runtime protocol probe failed: {protocol_probe.stderr.strip()}"
-        )
+        raise RuntimeAdapterError(f"Runtime protocol probe failed: {protocol_probe.stderr.strip()}")
     if _env_bool("RKNODE_REQUIRE_NPU_DEVICE", True):
         missing_paths = missing_rk3588_inference_paths()
         if missing_paths:

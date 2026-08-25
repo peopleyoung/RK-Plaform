@@ -16,6 +16,8 @@ from .contracts import (
     DeploymentResponse,
     DeploymentTargetReport,
     DeploymentTargetResponse,
+    InferenceGraphRevisionResponse,
+    InferenceGraphTaskCreate,
     InferenceNodeCreate,
     InferenceNodeCreated,
     InferenceNodeHeartbeat,
@@ -24,7 +26,6 @@ from .contracts import (
     InferenceNodeRegistrationResponse,
     InferenceNodeResponse,
     InferenceSummaryResponse,
-    InferenceTaskCreate,
     InferenceTaskListResponse,
     InferenceTaskResponse,
     InferenceTaskUpdate,
@@ -36,6 +37,12 @@ from .contracts import (
     NodeGroupUpdate,
 )
 from .errors import AuthenticationError
+from .inference_graph import (
+    GraphValidationRequest,
+    GraphValidationResponse,
+    OperatorCatalogResponse,
+    catalog_response,
+)
 from .inference_service import InferenceService, model_release_response
 
 router = APIRouter()
@@ -48,6 +55,18 @@ def _access_token(credentials: HTTPAuthorizationCredentials | None) -> str:
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise AuthenticationError()
     return credentials.credentials
+
+
+@router.get("/inference-operator-catalog", response_model=OperatorCatalogResponse)
+def get_inference_operator_catalog(_: Admin) -> OperatorCatalogResponse:
+    return catalog_response()
+
+
+@router.post("/inference-graphs/validate", response_model=GraphValidationResponse)
+def validate_inference_graph(
+    payload: GraphValidationRequest, _: Admin, context: Context
+) -> GraphValidationResponse:
+    return InferenceService(context).validate_graph(payload)
 
 
 @router.post(
@@ -86,9 +105,7 @@ def deprecate_model_release(release_id: str, _: Admin, context: Context) -> Mode
     return InferenceService(context).deprecate_release(release_id)
 
 
-@router.delete(
-    "/model-releases/{release_id}", status_code=status.HTTP_204_NO_CONTENT
-)
+@router.delete("/model-releases/{release_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_model_release(release_id: str, _: Admin, context: Context) -> Response:
     InferenceService(context).delete_release(release_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -182,7 +199,6 @@ def inference_node_heartbeat(
     return InferenceService(context).heartbeat_node(node_id, _access_token(credentials), payload)
 
 
-
 @router.get("/inference-agent/nodes/{node_id}/desired", response_model=AgentDesiredState)
 def inference_node_desired_state(
     node_id: str, credentials: Credentials, context: Context
@@ -223,7 +239,7 @@ def download_inference_artifact(
     status_code=status.HTTP_201_CREATED,
 )
 def create_inference_task(
-    payload: InferenceTaskCreate, _: Admin, context: Context
+    payload: InferenceGraphTaskCreate, _: Admin, context: Context
 ) -> InferenceTaskResponse:
     return InferenceService(context).create_task(payload)
 
@@ -236,6 +252,16 @@ def list_inference_tasks(
     page_size: Annotated[int, Query(alias="pageSize", ge=1, le=100)] = 20,
 ) -> InferenceTaskListResponse:
     return InferenceService(context).list_tasks(page, page_size)
+
+
+@router.get(
+    "/inference-tasks/{task_id}/graph-revisions",
+    response_model=list[InferenceGraphRevisionResponse],
+)
+def list_inference_graph_revisions(
+    task_id: str, _: Admin, context: Context
+) -> list[InferenceGraphRevisionResponse]:
+    return InferenceService(context).list_graph_revisions(task_id)
 
 
 @router.put("/inference-tasks/{task_id}", response_model=InferenceTaskResponse)

@@ -14,7 +14,7 @@
 
 RK3588 推理镜像内置 10 类可注册算子：`VideoCaptureNode`、`RkMppCaptureNode`、`InferNode`、`ByteTrackNode`、`SecondaryInferNode`、`AnalyticsNode`、`EventOutputNode`、`JsonOutputNode`、`KafkaOutputNode` 和 `ZlmSeiOutputNode`。
 
-单个任务不会固定启用全部算子。平台根据任务的 `media` 和 `analytics` 配置，在每次 desired revision 中生成动态图：
+单个任务不会固定启用全部算子。创建任务时，用户从服务端算子目录选择节点并编辑默认参数；平台校验受限 DAG、模型适配器、节点能力和媒体约束，再保存完整图快照：
 
 ~~~text
 Capture -> 主推理 -> [ByteTrack] -> [二级推理] -> [区域/越线] -> [事件]
@@ -23,7 +23,9 @@ Capture -> 主推理 -> [ByteTrack] -> [二级推理] -> [区域/越线] -> [事
                                       └-> [ZLM SEI]
 ~~~
 
-其中 `decoder=rkmpp` 才能使用 RKMPP 硬解码、事件录像和 ZLM SEI；ByteTrack、区域/越线分析和二级推理仅适用于 YOLO 检测任务。`AnalyticsNode` 同时承载区域和越线规则，`EventOutputNode` 同时承载事件抓拍和录像，Kafka 与 ZLM SEI 是独立输出分支。旧任务的空 `media` 配置仍使用 OpenCV + JSON 兼容链路。
+其中 `capture.rkmpp` 才能使用事件录像和 `output.zlm_sei`；ByteTrack、区域/越线分析和二级推理仅适用于 YOLO 检测任务。`AnalyticsNode` 同时承载区域和越线规则，`EventOutputNode` 同时承载事件抓拍和录像，Kafka 与 ZLM SEI 是独立输出分支。板端 YOLO 推理只接受 `YOLO_DFL_SPLIT`，旧 `V5` 和旧 `ByteTrack` 模型推理类型已移除；`ByteTrackNode` 跟踪算子仍保留。
+
+新任务只接受 `graph` 契约，不接受顶层 `releaseId`、`media` 或 `analytics`。保存任务只生成草稿和不可变图修订，必须另行创建部署批次才能下发。旧任务不会自动转换，升级前按 [系统指南](docs/system-guide.md#旧推理任务迁移) 执行备份和显式清理。
 
 当前在线部署版本为 API/Web `2026.08.25`、Media `2026.08.24`、RK3588 转换/推理 `2026.08.25-business`；训练镜像仍按角色使用 `2026.08.24`。离线包版本独立维护，执行前以包内 `VERSION` 和 `manifest.json` 为准。
 
