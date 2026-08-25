@@ -7,7 +7,7 @@ from pathlib import Path
 def test_deeplab_postprocess_cpp_contract(tmp_path: Path) -> None:
     project = Path(__file__).parents[1]
     pipeline = project / "third_party" / "nv_video_pipeline"
-    image = "rknode-rk3588-node:2026.08.20-business"
+    image = "rknode-rk3588-node:2026.08.24-business"
     command = " ".join(
         (
             "c++ -std=c++17 -Wall -Wextra -Werror",

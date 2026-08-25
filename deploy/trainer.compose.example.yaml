@@ -7,7 +7,7 @@ services:
       args:
         DEBIAN_MIRROR: http://deb.debian.org
         PYTHON_INDEX_URL: https://pypi.org/simple
-    image: rknode-trainer-torch-cpu:2026.08.20
+    image: rknode-trainer-torch-cpu:2026.08.24
     restart: unless-stopped
     environment:
       RKNODE_API_URL: http://172.16.66.249:5173/api/v1
@@ -28,7 +28,7 @@ services:
       args:
         DEBIAN_MIRROR: http://deb.debian.org
         PYTHON_INDEX_URL: https://pypi.org/simple
-    image: rknode-trainer-paddle-cpu:2026.08.20
+    image: rknode-trainer-paddle-cpu:2026.08.24
     restart: unless-stopped
     environment:
       RKNODE_API_URL: http://172.16.66.249:5173/api/v1

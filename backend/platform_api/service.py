@@ -9,7 +9,7 @@ from typing import Any, Literal, cast
 
 from fastapi import UploadFile
 from pydantic import ValidationError
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from .context import AppContext
@@ -21,6 +21,7 @@ from .contracts import (
     DatasetResponse,
     DatasetStatus,
     DeploymentManifest,
+    InferenceTaskStatus,
     JobEventResponse,
     JobResponse,
     JobStatus,
@@ -43,6 +44,7 @@ from .contracts import (
 from .db_models import (
     ArtifactRecord,
     DatasetRecord,
+    InferenceTaskRecord,
     JobEventRecord,
     JobRecord,
     ModelReleaseRecord,
@@ -109,7 +111,14 @@ def artifact_response(record: ArtifactRecord) -> ArtifactResponse:
     )
 
 
-def service_endpoint_response(record: ServiceEndpointRecord) -> ServiceEndpointResponse:
+def service_endpoint_response(
+    record: ServiceEndpointRecord, *, inference_active_tasks: int | None = None
+) -> ServiceEndpointResponse:
+    remote_metadata = dict(record.remote_metadata_json or {})
+    if record.kind == ServiceEndpointKind.INFERENCE.value and inference_active_tasks is not None:
+        # Direct inference health has no central task registry. Overlay the
+        # authoritative platform count so the node page does not report zero.
+        remote_metadata["activeJobs"] = inference_active_tasks
     return ServiceEndpointResponse(
         id=record.id,
         name=record.name,
@@ -130,7 +139,7 @@ def service_endpoint_response(record: ServiceEndpointRecord) -> ServiceEndpointR
         probe_status=record.probe_status,
         last_probe_at=record.last_probe_at,
         last_error=record.last_error,
-        remote_metadata=record.remote_metadata_json or {},
+        remote_metadata=remote_metadata,
         inference_node_id=record.inference_node_id,
         created_at=record.created_at,
         updated_at=record.updated_at,
@@ -737,7 +746,42 @@ class PlatformService:
             records = session.scalars(
                 select(ServiceEndpointRecord).order_by(ServiceEndpointRecord.created_at.desc())
             ).all()
-            return [service_endpoint_response(record) for record in records]
+            inference_node_ids = {
+                record.inference_node_id
+                for record in records
+                if record.kind == ServiceEndpointKind.INFERENCE.value
+                and record.inference_node_id is not None
+            }
+            active_tasks_by_node: dict[str, int] = {}
+            if inference_node_ids:
+                active_tasks_by_node = {
+                    node_id: count
+                    for node_id, count in session.execute(
+                        select(InferenceTaskRecord.node_id, func.count(InferenceTaskRecord.id))
+                        .where(
+                            InferenceTaskRecord.node_id.in_(inference_node_ids),
+                            InferenceTaskRecord.status.in_(
+                                {
+                                    InferenceTaskStatus.DEPLOYING.value,
+                                    InferenceTaskStatus.RUNNING.value,
+                                    InferenceTaskStatus.DEGRADED.value,
+                                }
+                            ),
+                        )
+                        .group_by(InferenceTaskRecord.node_id)
+                    ).all()
+                }
+            return [
+                service_endpoint_response(
+                    record,
+                    inference_active_tasks=(
+                        active_tasks_by_node.get(record.inference_node_id or "", 0)
+                        if record.kind == ServiceEndpointKind.INFERENCE.value
+                        else None
+                    ),
+                )
+                for record in records
+            ]
 
     def create_service_endpoint(
         self, payload: ServiceEndpointPayload

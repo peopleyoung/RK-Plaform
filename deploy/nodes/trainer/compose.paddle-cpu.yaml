@@ -8,7 +8,7 @@ services:
         PADDLE_PACKAGE: paddlepaddle==3.2.2
         PADDLE_INDEX_URL: https://pypi.org/simple
         PYTHON_INDEX_URL: https://pypi.org/simple
-    image: rknode-trainer-paddle-cpu:2026.08.20
+    image: rknode-trainer-paddle-cpu:2026.08.24
     environment:
       RKNODE_ENDPOINT_ID: replace-with-paddle-cpu-endpoint-id
       RKNODE_NODE_NAME: cpu-paddle-trainer-01

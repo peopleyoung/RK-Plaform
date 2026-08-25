@@ -19,9 +19,9 @@ from .database import Database
 from .direct_dispatcher import DirectNodeDispatcher
 from .errors import AppError
 from .inference_routes import router as inference_router
+from .media_routes import router as media_router
 from .media_secrets import MediaSecretStore
 from .media_service import MediaService
-from .media_routes import router as media_router
 from .node_secrets import NodeSecretStore
 from .profiles import ModelProfileRegistry
 from .routes import router

@@ -4,9 +4,7 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi.testclient import TestClient
-from sqlalchemy import select
-
+from backend.platform_api.contracts import InferenceTaskStatus
 from backend.platform_api.db_models import (
     ArtifactRecord,
     InferenceNodeRecord,
@@ -17,6 +15,9 @@ from backend.platform_api.db_models import (
     ServiceEndpointRecord,
 )
 from backend.platform_api.service import new_id
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+
 from tests.conftest import ADMIN_HEADERS
 
 
@@ -297,7 +298,7 @@ def test_release_node_task_deployment_and_agent_artifact_access(client: TestClie
         )
         assert report.status_code == 200, report.text
     final_task = client.get(
-        f"/api/v1/inference-tasks?page=1&pageSize=20", headers=ADMIN_HEADERS
+        "/api/v1/inference-tasks?page=1&pageSize=20", headers=ADMIN_HEADERS
     )
     assert final_task.status_code == 200
     assert final_task.json()["items"][0]["status"] == "running"
@@ -307,6 +308,53 @@ def test_release_node_task_deployment_and_agent_artifact_access(client: TestClie
     )
     assert downloaded.status_code == 200
     assert downloaded.content == b"rknn-model"
+
+
+def test_service_endpoint_reports_active_inference_task_load(client: TestClient) -> None:
+    release, _ = _published_release(client)
+    node_id, _ = _register_active_node(client, "deeplab_logits_v1", suffix="load-count")
+    task = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "load-count-task",
+            "releaseId": release["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/load-count",
+        },
+    )
+    assert task.status_code == 201, task.text
+    context = client.app.state.context
+    with context.database.session() as session:
+        endpoint_id = new_id("service")
+        session.add(
+            ServiceEndpointRecord(
+                id=endpoint_id,
+                name="load-count-inference",
+                kind="inference",
+                endpoint="http://127.0.0.1:11082",
+                mode="direct",
+                scheme="http",
+                host="127.0.0.1",
+                port=11082,
+                accelerator="rk3588",
+                capabilities_json=["deeplab_logits_v1"],
+                enabled=True,
+                token_configured=True,
+                enrollment_status="enrolled",
+                probe_status="online",
+                remote_metadata_json={"maxConcurrency": 4, "activeJobs": 0},
+                inference_node_id=node_id,
+            )
+        )
+        record = session.get(InferenceTaskRecord, task.json()["id"])
+        assert record is not None
+        record.status = InferenceTaskStatus.RUNNING.value
+
+    listed = client.get("/api/v1/service-endpoints", headers=ADMIN_HEADERS)
+    assert listed.status_code == 200, listed.text
+    endpoint = next(item for item in listed.json() if item["id"] == endpoint_id)
+    assert endpoint["remoteMetadata"]["activeJobs"] == 1
 
 
 def test_inference_task_context_worker_counts_round_trip_and_validate(
@@ -553,7 +601,7 @@ def test_exclusive_npu_core_overlap_is_rejected_before_deployment(
     assert conflict.json()["error"]["code"] == "inference_npu_core_conflict"
 
 
-def test_stopped_inference_task_can_restart_with_a_new_deployment(client: TestClient) -> None:
+def test_stopped_inference_task_restart_reuses_the_task_revision(client: TestClient) -> None:
     release, _ = _published_release(client)
     node_id, access_token = _register_active_node(client, "deeplab_logits_v1")
     created = client.post(
@@ -569,14 +617,27 @@ def test_stopped_inference_task_can_restart_with_a_new_deployment(client: TestCl
     assert created.status_code == 201, created.text
     task_id = created.json()["id"]
 
+    deployments_before = client.get(
+        "/api/v1/deployments?page=1&pageSize=100", headers=ADMIN_HEADERS
+    ).json()["total"]
     restarted = client.post(
         f"/api/v1/inference-tasks/{task_id}/restart", headers=ADMIN_HEADERS
     )
-    assert restarted.status_code == 201, restarted.text
-    first_deployment = restarted.json()
-    assert first_deployment["name"] == "Restart restartable-segmentation"
-    assert first_deployment["status"] == "rolling"
-    assert first_deployment["targets"][0]["desiredRevision"] == 1
+    assert restarted.status_code == 200, restarted.text
+    assert restarted.json()["id"] == task_id
+    assert restarted.json()["status"] == "deploying"
+    assert restarted.json()["configRevision"] == 1
+    deployments_after = client.get(
+        "/api/v1/deployments?page=1&pageSize=100", headers=ADMIN_HEADERS
+    ).json()["total"]
+    assert deployments_after == deployments_before
+
+    desired = client.get(
+        f"/api/v1/inference-agent/nodes/{node_id}/desired",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert desired.status_code == 200, desired.text
+    assert desired.json()["tasks"][0]["deploymentTargetId"] is None
 
     duplicate = client.post(
         f"/api/v1/inference-tasks/{task_id}/restart", headers=ADMIN_HEADERS
@@ -584,15 +645,13 @@ def test_stopped_inference_task_can_restart_with_a_new_deployment(client: TestCl
     assert duplicate.status_code == 409, duplicate.text
     assert duplicate.json()["error"]["code"] == "inference_task_not_restartable"
 
-    target = first_deployment["targets"][0]
     healthy = client.post(
-        f"/api/v1/inference-agent/nodes/{node_id}/targets/{target['id']}/status",
+        f"/api/v1/inference-agent/nodes/{node_id}/heartbeat",
         headers={"Authorization": f"Bearer {access_token}"},
         json={
-            "revision": target["desiredRevision"],
-            "state": "healthy",
-            "progress": 100,
-            "stage": "healthy",
+            "actualRevision": 1,
+            "health": "healthy",
+            "selfTestPassed": True,
         },
     )
     assert healthy.status_code == 200, healthy.text
@@ -613,8 +672,8 @@ def test_stopped_inference_task_can_restart_with_a_new_deployment(client: TestCl
     restarted_again = client.post(
         f"/api/v1/inference-tasks/{task_id}/restart", headers=ADMIN_HEADERS
     )
-    assert restarted_again.status_code == 201, restarted_again.text
-    assert restarted_again.json()["targets"][0]["desiredRevision"] == 3
+    assert restarted_again.status_code == 200, restarted_again.text
+    assert restarted_again.json()["configRevision"] == 3
 
 
 def test_failed_inference_task_restart_clears_previous_runtime_error(client: TestClient) -> None:
@@ -658,9 +717,9 @@ def test_failed_inference_task_restart_clears_previous_runtime_error(client: Tes
     restarted = client.post(
         f"/api/v1/inference-tasks/{task['id']}/restart", headers=ADMIN_HEADERS
     )
-    assert restarted.status_code == 201, restarted.text
-    assert restarted.json()["id"] != deployment["id"]
-    assert restarted.json()["targets"][0]["desiredRevision"] == 2
+    assert restarted.status_code == 200, restarted.text
+    assert restarted.json()["id"] == task["id"]
+    assert restarted.json()["configRevision"] == 2
     listed = client.get(
         "/api/v1/inference-tasks?page=1&pageSize=20", headers=ADMIN_HEADERS
     )
@@ -669,6 +728,26 @@ def test_failed_inference_task_restart_clears_previous_runtime_error(client: Tes
     )
     assert restarted_task["status"] == "deploying"
     assert restarted_task["errorMessage"] is None
+
+    heartbeat = client.post(
+        f"/api/v1/inference-agent/nodes/{node_id}/heartbeat",
+        headers={"Authorization": f"Bearer {access_token}"},
+        json={
+            "actualRevision": 1,
+            "failedRevision": 2,
+            "health": "degraded",
+            "selfTestPassed": True,
+        },
+    )
+    assert heartbeat.status_code == 200, heartbeat.text
+    listed = client.get(
+        "/api/v1/inference-tasks?page=1&pageSize=20", headers=ADMIN_HEADERS
+    )
+    failed_task = next(
+        item for item in listed.json()["items"] if item["id"] == task["id"]
+    )
+    assert failed_task["status"] == "failed"
+    assert failed_task["errorMessage"] == "Revision 2 failed on the inference node"
 
 
 def test_desired_state_promotes_labels_from_legacy_release_manifest(client: TestClient) -> None:
@@ -723,6 +802,57 @@ def test_model_release_prevents_source_job_deletion(client: TestClient) -> None:
     blocked = client.delete(f"/api/v1/jobs/{conversion_job_id}", headers=ADMIN_HEADERS)
     assert blocked.status_code == 409, blocked.text
     assert blocked.json()["error"]["code"] == "job_artifacts_published"
+
+
+def test_deprecated_model_release_can_be_deleted(client: TestClient) -> None:
+    release, _ = _published_release(client)
+    deprecated = client.post(
+        f"/api/v1/model-releases/{release['id']}/deprecate", headers=ADMIN_HEADERS
+    )
+    assert deprecated.status_code == 200, deprecated.text
+
+    deleted = client.delete(
+        f"/api/v1/model-releases/{release['id']}", headers=ADMIN_HEADERS
+    )
+    assert deleted.status_code == 204, deleted.text
+    listed = client.get(
+        "/api/v1/model-releases?page=1&pageSize=100", headers=ADMIN_HEADERS
+    )
+    assert listed.status_code == 200, listed.text
+    assert release["id"] not in {item["id"] for item in listed.json()["items"]}
+
+
+def test_model_release_delete_requires_deprecated_unreferenced_version(
+    client: TestClient,
+) -> None:
+    release, _ = _published_release(client)
+    published = client.delete(
+        f"/api/v1/model-releases/{release['id']}", headers=ADMIN_HEADERS
+    )
+    assert published.status_code == 409, published.text
+    assert published.json()["error"]["code"] == "model_release_not_deletable"
+
+    node_id, _ = _register_active_node(client, "deeplab_logits_v1", suffix="release-delete")
+    task = client.post(
+        "/api/v1/inference-tasks",
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "release-delete-reference",
+            "releaseId": release["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/release-delete-reference",
+        },
+    )
+    assert task.status_code == 201, task.text
+    deprecated = client.post(
+        f"/api/v1/model-releases/{release['id']}/deprecate", headers=ADMIN_HEADERS
+    )
+    assert deprecated.status_code == 200, deprecated.text
+    referenced = client.delete(
+        f"/api/v1/model-releases/{release['id']}", headers=ADMIN_HEADERS
+    )
+    assert referenced.status_code == 409, referenced.text
+    assert referenced.json()["error"]["code"] == "model_release_in_use"
 
 
 def test_inference_task_http_output_validation_and_update(client: TestClient) -> None:

@@ -207,6 +207,8 @@ class InferenceAgent:
             "adapters": list(self.settings.adapters),
             "metrics": {"desiredRevision": desired_revision},
         }
+        if self.failed_revision is not None:
+            payload["failedRevision"] = self.failed_revision
         if self.settings.features:
             payload["metadata"] = {"features": list(self.settings.features)}
         self.client.heartbeat(
@@ -253,25 +255,31 @@ class InferenceAgent:
                 releases[str(typed_item["id"])] = typed_item
         raw_tasks_value = desired.get("tasks", [])
         raw_tasks = cast(list[Any], raw_tasks_value) if isinstance(raw_tasks_value, list) else []
-        tasks_by_release: dict[str, list[tuple[str, dict[str, Any], dict[str, Any]]]] = {}
-        reference_tasks_by_release: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+        tasks_by_release: dict[
+            str, list[tuple[str | None, dict[str, Any], dict[str, Any]]]
+        ] = {}
+        reference_tasks_by_release: dict[str, list[tuple[str | None, dict[str, Any]]]] = {}
         for raw_task in raw_tasks:
             if not isinstance(raw_task, dict):
                 continue
             raw_task = cast(dict[str, Any], raw_task)
             target_id = raw_task.get("deploymentTargetId")
             release_id = raw_task.get("releaseId")
-            if not isinstance(target_id, str) or not isinstance(release_id, str):
+            if target_id is not None and not isinstance(target_id, str):
+                failed = True
+                continue
+            if not isinstance(release_id, str):
                 failed = True
                 continue
             release = releases.get(release_id)
             if release is None:
-                self._report_failure(
-                    target_id,
-                    revision=int(desired["revision"]),
-                    code="release_missing",
-                    message=release_id,
-                )
+                if target_id is not None:
+                    self._report_failure(
+                        target_id,
+                        revision=int(desired["revision"]),
+                        code="release_missing",
+                        message=release_id,
+                    )
                 failed = True
                 continue
             tasks_by_release.setdefault(release_id, []).append((target_id, raw_task, release))
@@ -296,12 +304,13 @@ class InferenceAgent:
                     failed = True
                     continue
                 if secondary_release_id not in releases:
-                    self._report_failure(
-                        target_id,
-                        revision=int(desired["revision"]),
-                        code="secondary_release_missing",
-                        message=secondary_release_id,
-                    )
+                    if target_id is not None:
+                        self._report_failure(
+                            target_id,
+                            revision=int(desired["revision"]),
+                            code="secondary_release_missing",
+                            message=secondary_release_id,
+                        )
                     failed = True
                     continue
                 reference_tasks_by_release.setdefault(secondary_release_id, []).append(
@@ -313,7 +322,9 @@ class InferenceAgent:
         staged_targets: set[str] = set()
         for release_id, release_references in reference_tasks_by_release.items():
             release = releases[release_id]
-            target_ids = sorted({target_id for target_id, _ in release_references})
+            target_ids = sorted(
+                target_id for target_id, _ in release_references if target_id is not None
+            )
             tasks = [task for _, task, _ in tasks_by_release.get(release_id, [])]
             probe_task = release_references[0][1]
             try:

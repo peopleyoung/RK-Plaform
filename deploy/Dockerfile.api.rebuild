@@ -1,0 +1,13 @@
+ARG RKNODE_BASE_IMAGE=rknode-platform-api:2026.08.24
+FROM ${RKNODE_BASE_IMAGE}
+
+COPY backend /app/backend
+COPY config /app/config
+
+ARG RKNODE_RELEASE_VERSION=dev
+ARG RKNODE_SOURCE_REVISION=unknown
+LABEL org.opencontainers.image.title="RKNode Platform API" \
+      org.opencontainers.image.version="${RKNODE_RELEASE_VERSION}" \
+      org.opencontainers.image.revision="${RKNODE_SOURCE_REVISION}" \
+      io.rknode.component="platform-api" \
+      io.rknode.offline-ready="true"

@@ -1,7 +1,7 @@
 # Legacy CUDA overlay.
 services:
   torch-trainer:
-    image: rknode-trainer-torch-cuda12.4:2026.08.20
+    image: rknode-trainer-torch-cuda12.4:2026.08.24
     build:
       args:
         BASE_IMAGE: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
@@ -17,7 +17,7 @@ services:
               capabilities: [gpu]
 
   paddle-trainer:
-    image: rknode-trainer-paddle-cuda12.6:2026.08.20
+    image: rknode-trainer-paddle-cuda12.6:2026.08.24
     build:
       args:
         BASE_IMAGE: python:3.11-slim-bookworm

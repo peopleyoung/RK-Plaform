@@ -41,6 +41,7 @@ bool ZlmSeiOutputNode::Init(YAML::Node config) {
 
 bool ZlmSeiOutputNode::open(const object_meta::PacketMeta::ptr& packet) {
     close();
+    timestamp_normalizer_.reset();
     codec_ = packet->encoded_packet->codec;
     if (avformat_alloc_output_context2(&format_, nullptr, "rtsp", output_uri_.c_str()) < 0 || !format_) {
         LOG_WARN("ZlmSeiOutputNode {} could not allocate RTSP output {}", getName(),
@@ -182,9 +183,12 @@ Data::BaseData::ptr ZlmSeiOutputNode::handle_data(Data::BaseData::ptr data) {
     }
     std::copy(access_unit.begin(), access_unit.end(), output->data);
     output->stream_index = stream_->index;
-    output->pts          = packet->encoded_packet->pts_us;
-    output->dts          = packet->encoded_packet->dts_us;
-    output->duration     = packet->encoded_packet->duration_us;
+    const auto timestamp = timestamp_normalizer_.normalize(
+        packet->encoded_packet->pts_us, packet->encoded_packet->dts_us,
+        packet->encoded_packet->duration_us, packet->fps);
+    output->pts          = timestamp.pts_us;
+    output->dts          = timestamp.dts_us;
+    output->duration     = timestamp.duration_us;
     if (packet->encoded_packet->key_frame) {
         output->flags |= AV_PKT_FLAG_KEY;
     }

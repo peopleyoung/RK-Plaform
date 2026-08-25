@@ -151,35 +151,6 @@ def test_legacy_output_uri_task_is_marked_for_media_migration(tmp_path: Path) ->
     assert row.media_migration_required == 1
 
 
-def test_legacy_output_uri_task_is_marked_for_media_migration(tmp_path: Path) -> None:
-    database = _seed_legacy_inference_task(tmp_path / "legacy-media.db")
-    with database.engine.begin() as connection:
-        connection.execute(
-            text(
-                "UPDATE inference_tasks SET media_json = :media "
-                "WHERE id = 'itask_legacy'"
-            ),
-            {
-                "media": (
-                    '{"decoder":"rkmpp","zlmSei":{"enabled":true,'
-                    '"outputUri":"rtsp://legacy/live/task"}}'
-                )
-            },
-        )
-
-    database.create_schema()
-    database.create_schema()
-
-    with database.engine.connect() as connection:
-        row = connection.execute(
-            text(
-                "SELECT media_migration_required FROM inference_tasks "
-                "WHERE id = 'itask_legacy'"
-            )
-        ).one()
-    assert row.media_migration_required == 1
-
-
 def test_existing_direct_endpoint_with_token_is_migrated_as_enrolled(
     tmp_path: Path,
 ) -> None:

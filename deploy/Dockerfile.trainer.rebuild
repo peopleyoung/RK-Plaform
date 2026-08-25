@@ -1,0 +1,21 @@
+ARG RKNODE_BASE_IMAGE
+FROM ${RKNODE_BASE_IMAGE}
+
+RUN rm -rf /opt/rknode/backend /opt/rknode/workers /opt/rknode/config
+COPY backend /opt/rknode/backend
+COPY workers /opt/rknode/workers
+COPY config /opt/rknode/config
+RUN find /opt/rknode -type d -name __pycache__ -prune -exec rm -rf '{}' +
+
+ARG RKNODE_RELEASE_VERSION=dev
+ARG RKNODE_SOURCE_REVISION=unknown
+ARG RKNODE_IMAGE_TITLE="RKNode Trainer"
+ARG RKNODE_IMAGE_FRAMEWORK=unknown
+ARG RKNODE_IMAGE_VARIANT=unknown
+LABEL org.opencontainers.image.title="${RKNODE_IMAGE_TITLE}" \
+      org.opencontainers.image.version="${RKNODE_RELEASE_VERSION}" \
+      org.opencontainers.image.revision="${RKNODE_SOURCE_REVISION}" \
+      io.rknode.component="trainer" \
+      io.rknode.framework="${RKNODE_IMAGE_FRAMEWORK}" \
+      io.rknode.variant="${RKNODE_IMAGE_VARIANT}" \
+      io.rknode.offline-ready="true"

@@ -6,7 +6,7 @@ x-rknode-logging: &rknode-logging
 
 services:
   converter:
-    image: rknode-rk3588-node:2026.08.20-business
+    image: rknode-rk3588-node:2026.08.24-business
     pull_policy: never
     restart: unless-stopped
     ports:

@@ -17,7 +17,7 @@ services:
         TORCH_VERSION: 2.5.1+cpu
         TORCHVISION_VERSION: 0.20.1+cpu
         PYTHON_INDEX_URL: https://pypi.org/simple
-    image: rknode-trainer-torch-cpu:2026.08.20
+    image: rknode-trainer-torch-cpu:2026.08.24
     entrypoint: []
     command: ["python", "-m", "workers.node_service.main"]
     restart: unless-stopped

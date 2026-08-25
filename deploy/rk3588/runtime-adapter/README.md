@@ -164,10 +164,10 @@ or registry access:
 ```bash
 docker build --platform linux/arm64 \
   -f deploy/rk3588/Dockerfile.node.rebuild \
-  --build-arg RKNODE_BASE_IMAGE=rknode-rk3588-node:2026.08.20-business \
-  --build-arg RKNODE_RELEASE_VERSION=2026.08.20-business \
+  --build-arg RKNODE_BASE_IMAGE=rknode-rk3588-node:2026.08.24-business \
+  --build-arg RKNODE_RELEASE_VERSION=2026.08.24-business \
   --build-arg RKNODE_BUILD_JOBS=2 \
-  -t rknode-rk3588-node:2026.08.20-business .
+  -t rknode-rk3588-node:2026.08.24-business .
 ```
 
 The rebuild file removes the old source/application trees before copying the

@@ -9,7 +9,7 @@ services:
         RKNN_TOOLKIT_IMAGE: rknn_toolkit2:2.3.2-debian12-cp311-aarch64
         DEBIAN_MIRROR: http://deb.debian.org
         PYTHON_INDEX_URL: https://pypi.org/simple
-    image: rknode-rk3588-node:2026.08.20-business
+    image: rknode-rk3588-node:2026.08.24-business
     restart: unless-stopped
     network_mode: host
     devices:
@@ -40,7 +40,7 @@ services:
         RKNN_TOOLKIT_IMAGE: rknn_toolkit2:2.3.2-debian12-cp311-aarch64
         DEBIAN_MIRROR: http://deb.debian.org
         PYTHON_INDEX_URL: https://pypi.org/simple
-    image: rknode-rk3588-node:2026.08.20-business
+    image: rknode-rk3588-node:2026.08.24-business
     init: true
     restart: unless-stopped
     network_mode: host
@@ -61,7 +61,7 @@ services:
       RKNODE_HARDWARE_ID: rk3588-board-01
       RKNODE_RUNTIME_VERSION: rknn-runtime-2.3.2
       RKNODE_DRIVER_VERSION: unknown
-      RKNODE_PIPELINE_VERSION: rknode-cpp-runtime-2026.08.20-business
+      RKNODE_PIPELINE_VERSION: rknode-cpp-runtime-2026.08.24-business
       RKNODE_ADAPTERS: yolo_dfl_split_v1,deeplab_logits_v1,ppocr_db_det_v1,ppocr_ctc_rec_v1
       RKNODE_MEDIA_FEATURES: rkmpp_decode,bytetrack,kafka,zlm_sei,analytics_area,analytics_line,event_snapshot,event_record,secondary_infer
       RKNODE_MODEL_DIR: /data/models

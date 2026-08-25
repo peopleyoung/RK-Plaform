@@ -86,6 +86,14 @@ def deprecate_model_release(release_id: str, _: Admin, context: Context) -> Mode
     return InferenceService(context).deprecate_release(release_id)
 
 
+@router.delete(
+    "/model-releases/{release_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+def delete_model_release(release_id: str, _: Admin, context: Context) -> Response:
+    InferenceService(context).delete_release(release_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.post("/node-groups", response_model=NodeGroupResponse, status_code=status.HTTP_201_CREATED)
 def create_node_group(payload: NodeGroupCreate, _: Admin, context: Context) -> NodeGroupResponse:
     return InferenceService(context).create_node_group(payload)
@@ -244,10 +252,9 @@ def stop_inference_task(task_id: str, _: Admin, context: Context) -> InferenceTa
 
 @router.post(
     "/inference-tasks/{task_id}/restart",
-    response_model=DeploymentResponse,
-    status_code=status.HTTP_201_CREATED,
+    response_model=InferenceTaskResponse,
 )
-def restart_inference_task(task_id: str, _: Admin, context: Context) -> DeploymentResponse:
+def restart_inference_task(task_id: str, _: Admin, context: Context) -> InferenceTaskResponse:
     return InferenceService(context).restart_task(task_id)
 
 

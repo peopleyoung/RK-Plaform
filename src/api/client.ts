@@ -100,6 +100,7 @@ export const api = {
   createModelRelease: (payload: { name: string; version: string; conversionJobId: string; description?: string }) => request<ModelRelease>('/model-releases', { method: 'POST', body: JSON.stringify(payload) }),
   publishModelRelease: (id: string) => request<ModelRelease>(`/model-releases/${encodeURIComponent(id)}/publish`, { method: 'POST' }),
   deprecateModelRelease: (id: string) => request<ModelRelease>(`/model-releases/${encodeURIComponent(id)}/deprecate`, { method: 'POST' }),
+  deleteModelRelease: (id: string) => requestEmpty(`/model-releases/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   nodeGroups: () => request<NodeGroup[]>('/node-groups'),
   createNodeGroup: (payload: { name: string; description?: string; labels?: string[] }) => request<NodeGroup>('/node-groups', { method: 'POST', body: JSON.stringify(payload) }),
   updateNodeGroup: (id: string, payload: { name: string; description?: string; labels?: string[] }) => request<NodeGroup>(`/node-groups/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(payload) }),
@@ -114,7 +115,7 @@ export const api = {
   createInferenceTask: (payload: { name: string; releaseId: string; nodeId?: string; groupId?: string; inputUri: string; interval?: number; thresholds?: Record<string, number>; output?: Record<string, unknown>; media?: Record<string, unknown>; analytics?: Record<string, unknown>; npuCoreMask?: InferenceTask['npuCoreMask']; npuCorePolicy?: InferenceTask['npuCorePolicy'] }) => request<InferenceTask>('/inference-tasks', { method: 'POST', body: JSON.stringify(payload) }),
   updateInferenceTask: (id: string, payload: { name: string; releaseId: string; nodeId?: string; groupId?: string; inputUri: string; interval?: number; thresholds?: Record<string, number>; output?: Record<string, unknown>; media?: Record<string, unknown>; analytics?: Record<string, unknown>; npuCoreMask?: InferenceTask['npuCoreMask']; npuCorePolicy?: InferenceTask['npuCorePolicy'] }) => request<InferenceTask>(`/inference-tasks/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(payload) }),
   stopInferenceTask: (id: string) => request<InferenceTask>(`/inference-tasks/${encodeURIComponent(id)}/stop`, { method: 'POST' }),
-  restartInferenceTask: (id: string) => request<Deployment>(`/inference-tasks/${encodeURIComponent(id)}/restart`, { method: 'POST' }),
+  restartInferenceTask: (id: string) => request<InferenceTask>(`/inference-tasks/${encodeURIComponent(id)}/restart`, { method: 'POST' }),
   inferencePlaybackSession: (id: string) => request<InferencePlaybackSession>(
     `/inference-tasks/${encodeURIComponent(id)}/playback-session`,
     { method: 'POST' },

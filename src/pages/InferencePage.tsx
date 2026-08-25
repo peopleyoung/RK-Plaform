@@ -14,6 +14,7 @@ import {
   normalizeInferenceAnalytics,
   type InferenceAnalyticsConfig,
 } from '../components/InferenceBusinessFields'
+import { buildInferenceTaskMedia } from './inferenceTaskPayload'
 import type { Deployment, InferenceNode, InferenceTask, ModelRelease, NodeGroup } from '../types'
 
 type Tab = 'nodes' | 'releases' | 'tasks' | 'deployments'
@@ -95,7 +96,8 @@ export function InferencePage({ notify }: { notify: (message: string) => void })
   const [taskKafkaTopic, setTaskKafkaTopic] = useState('sei_msg')
   const [taskKafkaKey, setTaskKafkaKey] = useState('')
   const [taskZlmSei, setTaskZlmSei] = useState(false)
-  const [taskZlmOutput, setTaskZlmOutput] = useState('')
+  const [taskZlmGatewayId, setTaskZlmGatewayId] = useState('')
+  const [taskZlmStreamName, setTaskZlmStreamName] = useState('')
   const [taskAnalytics, setTaskAnalytics] = useState<InferenceAnalyticsConfig>(emptyInferenceAnalytics)
   const [deploymentName, setDeploymentName] = useState('生产线灰度发布')
   const [deploymentReleaseId, setDeploymentReleaseId] = useState('')
@@ -104,6 +106,7 @@ export function InferencePage({ notify }: { notify: (message: string) => void })
   const [detailDeployment, setDetailDeployment] = useState<Deployment | null>(null)
   const [previewTask, setPreviewTask] = useState<InferenceTask | null>(null)
   const [deleteNodeTarget, setDeleteNodeTarget] = useState<InferenceNode | null>(null)
+  const [deleteReleaseTarget, setDeleteReleaseTarget] = useState<ModelRelease | null>(null)
   const [deleteDeploymentTarget, setDeleteDeploymentTarget] = useState<Deployment | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [page, setPage] = useState(1)
@@ -191,7 +194,7 @@ export function InferencePage({ notify }: { notify: (message: string) => void })
   const taskMediaInvalid = (taskDecoder === 'rkmpp' && !taskInput.trim().startsWith('rtsp://'))
     || (taskTracking && (!trackingSupported || taskTrackBuffer < 1 || taskTrackBuffer > 10000))
     || (taskKafka && (!taskKafkaBrokers.trim() || !taskKafkaTopic.trim()))
-    || (taskZlmSei && (taskDecoder !== 'rkmpp' || !taskZlmOutput.trim().startsWith('rtsp://')))
+    || (taskZlmSei && (taskDecoder !== 'rkmpp' || !taskZlmGatewayId.trim() || !taskZlmStreamName.trim()))
   const taskAnalyticsError = inferenceAnalyticsError(
     taskAnalytics,
     trackingSupported,
@@ -241,7 +244,8 @@ export function InferencePage({ notify }: { notify: (message: string) => void })
     setTaskKafkaTopic('sei_msg')
     setTaskKafkaKey('')
     setTaskZlmSei(false)
-    setTaskZlmOutput('')
+    setTaskZlmGatewayId('')
+    setTaskZlmStreamName('')
     setTaskAnalytics(emptyInferenceAnalytics())
     setDialog('task')
   }
@@ -272,7 +276,8 @@ export function InferencePage({ notify }: { notify: (message: string) => void })
     setTaskKafkaTopic(typeof kafka.topic === 'string' ? kafka.topic : 'sei_msg')
     setTaskKafkaKey(typeof kafka.key === 'string' ? kafka.key : '')
     setTaskZlmSei(zlmSei.enabled === true)
-    setTaskZlmOutput(typeof zlmSei.outputUri === 'string' ? zlmSei.outputUri : '')
+    setTaskZlmGatewayId(typeof zlmSei.gatewayId === 'string' ? zlmSei.gatewayId : '')
+    setTaskZlmStreamName(typeof zlmSei.streamName === 'string' ? zlmSei.streamName : '')
     setTaskAnalytics(normalizeInferenceAnalytics(task.analytics))
     setDialog('task')
   }
@@ -313,12 +318,18 @@ export function InferencePage({ notify }: { notify: (message: string) => void })
           nodeId: taskNodeId,
           inputUri: taskInput.trim(),
           output,
-          media: {
+          media: buildInferenceTaskMedia({
             decoder: taskDecoder,
-            tracking: { enabled: taskTracking, trackBuffer: taskTrackBuffer },
-            kafka: { enabled: taskKafka, brokers: taskKafkaBrokers.trim(), topic: taskKafkaTopic.trim(), key: taskKafkaKey.trim(), queueMessages: 10000, messageTimeoutMs: 3000 },
-            zlmSei: { enabled: taskZlmSei, outputUri: taskZlmOutput.trim(), reconnectMs: 1000 },
-          },
+            trackingEnabled: taskTracking,
+            trackBuffer: taskTrackBuffer,
+            kafkaEnabled: taskKafka,
+            kafkaBrokers: taskKafkaBrokers,
+            kafkaTopic: taskKafkaTopic,
+            kafkaKey: taskKafkaKey,
+            zlmSeiEnabled: taskZlmSei,
+            zlmGatewayId: taskZlmGatewayId,
+            zlmStreamName: taskZlmStreamName,
+          }),
           analytics: taskAnalytics,
           npuCoreMask: taskNpuCoreMask,
           npuCorePolicy: taskNpuCorePolicy,
@@ -354,9 +365,9 @@ export function InferencePage({ notify }: { notify: (message: string) => void })
     if (taskActionId) return
     setTaskActionId(task.id)
     try {
-      const deployment = await api.restartInferenceTask(task.id)
+      const restarted = await api.restartInferenceTask(task.id)
       await reloadInference()
-      notify(`推理任务「${task.name}」正在重启，部署批次「${deployment.name}」已创建`)
+      notify(`推理任务「${task.name}」正在重启，配置修订 ${restarted.configRevision} 已下发`)
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : '重启任务失败')
     } finally {
@@ -402,6 +413,20 @@ export function InferencePage({ notify }: { notify: (message: string) => void })
     if (!window.confirm(`确认弃用模型版本「${release.name} ${release.version}」？`)) return
     try { await api.deprecateModelRelease(release.id); await reloadInference(); notify(`模型版本「${release.name} ${release.version}」已弃用`) } catch (reason) { notify(reason instanceof Error ? reason.message : '模型弃用失败') }
   }
+  const deleteDeprecatedRelease = async () => {
+    if (!deleteReleaseTarget) return
+    setDeleting(true)
+    try {
+      await api.deleteModelRelease(deleteReleaseTarget.id)
+      await reloadInference()
+      notify(`模型版本「${deleteReleaseTarget.name} ${deleteReleaseTarget.version}」已永久删除`)
+      setDeleteReleaseTarget(null)
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : '模型版本删除失败')
+    } finally {
+      setDeleting(false)
+    }
+  }
   const retireTask = async (task: InferenceTask) => {
     if (!window.confirm(`确认退役推理任务「${task.name}」？`)) return
     try { await api.retireInferenceTask(task.id); await reloadInference(); notify(`推理任务「${task.name}」已退役`) } catch (reason) { notify(reason instanceof Error ? reason.message : '任务退役失败') }
@@ -428,7 +453,7 @@ export function InferencePage({ notify }: { notify: (message: string) => void })
     <div className="toolbar tab-toolbar"><div className="tabs" role="tablist">{tabs.map(([value, label]) => <button key={value} className={tab === value ? 'active' : ''} onClick={() => setTab(value)} role="tab">{label}</button>)}</div></div>
     {loading && !visibleItems.length ? <EmptyState title="正在加载推理资源" message="正在读取当前页和节点概况。" /> : <>
       {tab === 'nodes' && <NodesTable nodes={visibleItems as InferenceNode[]} groups={nodeGroups} pagination={pagination} onApprove={approve} onRetire={retireNode} onDelete={setDeleteNodeTarget} />}
-      {tab === 'releases' && <ReleasesTable releases={visibleItems as ModelRelease[]} jobs={jobs} pagination={pagination} onPublish={publish} onDeprecate={deprecateRelease} />}
+      {tab === 'releases' && <ReleasesTable releases={visibleItems as ModelRelease[]} jobs={jobs} pagination={pagination} onPublish={publish} onDeprecate={deprecateRelease} onDelete={setDeleteReleaseTarget} />}
       {tab === 'tasks' && <TasksTable tasks={visibleItems as InferenceTask[]} releases={modelReleases} nodes={inferenceNodes} pagination={pagination} busyTaskId={taskActionId} onPreview={setPreviewTask} onStop={stopTask} onRestart={restartTask} onEdit={editTask} onRetire={retireTask} />}
       {tab === 'deployments' && <DeploymentsTable deployments={visibleItems as Deployment[]} releases={modelReleases} nodes={inferenceNodes} pagination={pagination} onRetry={retryDeployment} onRollback={rollback} onDetail={setDetailDeployment} onDelete={setDeleteDeploymentTarget} />}
     </>}
@@ -439,6 +464,7 @@ export function InferencePage({ notify }: { notify: (message: string) => void })
     {detailDeployment && <DeploymentDetailModal deployment={detailDeployment} nodes={inferenceNodes} tasks={inferenceTasks} onClose={() => setDetailDeployment(null)} />}
     {previewTask && <Modal open title={`实时预览 · ${previewTask.name}`} description="播放原始 RTSP 转发流，并在浏览器端解析 SEI 结果叠加。" width="large" onClose={() => setPreviewTask(null)}><InferenceStreamPlayer task={previewTask} /></Modal>}
     <ConfirmDialog open={Boolean(deleteNodeTarget)} title="永久删除退役板卡" description={deleteNodeTarget ? `确定永久删除「${deleteNodeTarget.name}」吗？系统会同时清理其推理服务配置和已退役任务；如仍有未退役任务或部署历史，删除将被拒绝。` : ''} confirmLabel="永久删除" busy={deleting} onClose={() => !deleting && setDeleteNodeTarget(null)} onConfirm={() => void deleteRetiredNode()} />
+    <ConfirmDialog open={Boolean(deleteReleaseTarget)} title="永久删除弃用模型版本" description={deleteReleaseTarget ? `确定永久删除「${deleteReleaseTarget.name} ${deleteReleaseTarget.version}」吗？如仍被推理任务或部署历史引用，系统将拒绝删除。模型产物和来源任务不会被删除。` : ''} confirmLabel="永久删除" busy={deleting} onClose={() => !deleting && setDeleteReleaseTarget(null)} onConfirm={() => void deleteDeprecatedRelease()} />
     <ConfirmDialog open={Boolean(deleteDeploymentTarget)} title="删除部署批次" description={deleteDeploymentTarget ? `确定删除部署批次「${deleteDeploymentTarget.name}」及其目标状态和事件日志吗？推理任务与模型版本不会被删除。` : ''} confirmLabel="删除部署批次" busy={deleting} onClose={() => !deleting && setDeleteDeploymentTarget(null)} onConfirm={() => void deleteDeployment()} />
   </div>
 }
@@ -447,8 +473,8 @@ function NodesTable({ nodes, groups, pagination, onApprove, onRetire, onDelete }
   return <section className="panel table-panel"><div className="table-meta"><span>共 <strong>{pagination.total}</strong> 块板卡</span><span>当前页 {nodes.length} 块</span></div>{nodes.length ? <><div className="table-scroll"><table className="data-table inference-table"><thead><tr><th>板卡</th><th>节点组</th><th>生命周期</th><th>连接 / 健康</th><th>适配器 / 媒体能力</th><th>期望 / 实际版本</th><th>最近心跳</th><th aria-label="操作" /></tr></thead><tbody>{nodes.map((node) => { const features = nodeMediaFeatures(node); return <tr key={node.id}><td><strong>{node.name}</strong><small>{node.hardwareId ?? '等待板端注册'}</small></td><td>{groups.find((group) => group.id === node.groupId)?.name ?? '未分组'}</td><td><StatusBadge tone={tone(node.lifecycle)}>{lifecycleLabels[node.lifecycle]}</StatusBadge></td><td><StatusBadge tone={tone(node.health)}>{node.connectivity === 'online' ? '在线' : '离线'} · {node.health}</StatusBadge></td><td><div className="capability-list">{node.adapters.map((adapter) => <span key={adapter}>{adapter}</span>)}</div><small className="node-media-features">媒体：{features.length ? features.map((feature) => mediaFeatureLabels[feature] ?? feature).join(' · ') : '未上报（旧节点）'}</small></td><td><strong>{node.desiredRevision} / {node.actualRevision}</strong><small>{node.deploymentStatus}</small></td><td className="muted-cell">{node.lastSeenAt ? formatTime(node.lastSeenAt) : '尚未心跳'}</td><td>{node.lifecycle === 'awaiting_approval' ? <Button variant="secondary" onClick={() => onApprove(node)} disabled={!node.selfTestPassed} icon={<Check size={15} />}>审批启用</Button> : node.lifecycle === 'active' ? <div className="row-actions"><StatusBadge tone="success">可接收部署</StatusBadge><button className="icon-button ghost danger-action" title="退役板卡" aria-label={`退役板卡 ${node.name}`} onClick={() => onRetire(node)}><Trash2 size={16} /></button></div> : node.lifecycle === 'retired' ? <button className="icon-button ghost danger-action" title="永久删除退役板卡" aria-label={`永久删除退役板卡 ${node.name}`} onClick={() => onDelete(node)}><Trash2 size={16} /></button> : null}</td></tr>})}</tbody></table></div><TablePagination {...pagination} /></> : <EmptyState title="暂无 RK3588 板卡" message="先在系统设置启动并添加推理节点，再创建推理任务。" />}</section>
 }
 
-function ReleasesTable({ releases, jobs, pagination, onPublish, onDeprecate }: { releases: ModelRelease[]; jobs: { id: string; name: string }[]; pagination: PaginationState; onPublish: (release: ModelRelease) => void; onDeprecate: (release: ModelRelease) => void }) {
-  return <section className="panel table-panel"><div className="table-meta"><span>共 <strong>{pagination.total}</strong> 个模型版本</span><span>当前页 {releases.length} 个</span></div>{releases.length ? <><div className="table-scroll"><table className="data-table inference-table"><thead><tr><th>模型版本</th><th>任务 / 变体</th><th>精度 / 适配器</th><th>来源转换任务</th><th>状态</th><th>登记时间</th><th aria-label="操作" /></tr></thead><tbody>{releases.map((release) => <tr key={release.id}><td><strong>{release.name}</strong><small>{release.version}</small></td><td><strong>{release.profileId}</strong><small>{release.variant}</small></td><td><span className="precision-badge int8">{release.precision.toUpperCase()}</span><small>{release.adapter}</small></td><td className="muted-cell">{jobs.find((job) => job.id === release.sourceConversionJobId)?.name ?? '来源任务不可用'}</td><td><StatusBadge tone={tone(release.status)}>{releaseLabels[release.status]}</StatusBadge></td><td className="muted-cell">{formatTime(release.createdAt)}</td><td><div className="row-actions">{release.status === 'qualified' && <Button variant="secondary" onClick={() => onPublish(release)} icon={<UploadCloud size={15} />}>发布</Button>}{release.status === 'published' && <button className="icon-button ghost danger-action" title="弃用模型版本" aria-label={`弃用模型版本 ${release.name}`} onClick={() => onDeprecate(release)}><Trash2 size={16} /></button>}</div></td></tr>)}</tbody></table></div><TablePagination {...pagination} /></> : <EmptyState title="暂无模型版本" message="转换任务完成并通过校验后，可登记为可下发版本。" />}</section>
+function ReleasesTable({ releases, jobs, pagination, onPublish, onDeprecate, onDelete }: { releases: ModelRelease[]; jobs: { id: string; name: string }[]; pagination: PaginationState; onPublish: (release: ModelRelease) => void; onDeprecate: (release: ModelRelease) => void; onDelete: (release: ModelRelease) => void }) {
+  return <section className="panel table-panel"><div className="table-meta"><span>共 <strong>{pagination.total}</strong> 个模型版本</span><span>当前页 {releases.length} 个</span></div>{releases.length ? <><div className="table-scroll"><table className="data-table inference-table"><thead><tr><th>模型版本</th><th>任务 / 变体</th><th>精度 / 适配器</th><th>来源转换任务</th><th>状态</th><th>登记时间</th><th aria-label="操作" /></tr></thead><tbody>{releases.map((release) => <tr key={release.id}><td><strong>{release.name}</strong><small>{release.version}</small></td><td><strong>{release.profileId}</strong><small>{release.variant}</small></td><td><span className="precision-badge int8">{release.precision.toUpperCase()}</span><small>{release.adapter}</small></td><td className="muted-cell">{jobs.find((job) => job.id === release.sourceConversionJobId)?.name ?? '来源任务不可用'}</td><td><StatusBadge tone={tone(release.status)}>{releaseLabels[release.status]}</StatusBadge></td><td className="muted-cell">{formatTime(release.createdAt)}</td><td><div className="row-actions">{release.status === 'qualified' && <Button variant="secondary" onClick={() => onPublish(release)} icon={<UploadCloud size={15} />}>发布</Button>}{release.status === 'published' && <button className="icon-button ghost danger-action" title="弃用模型版本" aria-label={`弃用模型版本 ${release.name}`} onClick={() => onDeprecate(release)}><Trash2 size={16} /></button>}{release.status === 'deprecated' && <button className="icon-button ghost danger-action" title="永久删除弃用模型版本" aria-label={`永久删除模型版本 ${release.name}`} onClick={() => onDelete(release)}><Trash2 size={16} /></button>}</div></td></tr>)}</tbody></table></div><TablePagination {...pagination} /></> : <EmptyState title="暂无模型版本" message="转换任务完成并通过校验后，可登记为可下发版本。" />}</section>
 }
 
 function TasksTable({ tasks, releases, nodes, pagination, busyTaskId, onPreview, onStop, onRestart, onEdit, onRetire }: { tasks: InferenceTask[]; releases: ModelRelease[]; nodes: InferenceNode[]; pagination: PaginationState; busyTaskId: string; onPreview: (task: InferenceTask) => void; onStop: (task: InferenceTask) => void; onRestart: (task: InferenceTask) => void; onEdit: (task: InferenceTask) => void; onRetire: (task: InferenceTask) => void }) {

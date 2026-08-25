@@ -4,7 +4,6 @@ import hashlib
 import importlib
 import json
 import math
-import re
 import shutil
 import xml.etree.ElementTree as ET
 from collections import defaultdict
@@ -393,25 +392,30 @@ def _resolve_detection_format(root: Path, requested: DatasetFormat) -> DatasetFo
         matches.append(DatasetFormat.YOLO)
     if _voc_detection_roots(root):
         matches.append(DatasetFormat.VOC_DETECTION)
-    if _coco_annotation_candidates(root, "train") and _coco_annotation_candidates(root, "val"):
+    if _coco_annotation_candidates(root):
         matches.append(DatasetFormat.COCO_DETECTION)
     return _single_detected_format(matches, "object detection")
 
 
 def _resolve_segmentation_format(root: Path, requested: DatasetFormat) -> DatasetFormat:
-    if requested != DatasetFormat.AUTO:
-        if requested not in SEGMENTATION_FORMATS:
-            raise DatasetValidationError(
-                f"Dataset format '{requested}' is not valid for semantic segmentation"
-            )
-        return requested
     matches: list[DatasetFormat] = []
     if _mask_pairs_roots(root):
         matches.append(DatasetFormat.MASK_PAIRS)
     if _voc_segmentation_roots(root):
         matches.append(DatasetFormat.VOC_SEGMENTATION)
-    if _coco_annotation_candidates(root, "train") and _coco_annotation_candidates(root, "val"):
+    if _coco_annotation_candidates(root):
         matches.append(DatasetFormat.COCO_SEGMENTATION)
+    if requested != DatasetFormat.AUTO:
+        if requested not in SEGMENTATION_FORMATS:
+            raise DatasetValidationError(
+                f"Dataset format '{requested}' is not valid for semantic segmentation"
+            )
+        if requested in matches:
+            return requested
+        if len(matches) == 1:
+            return matches[0]
+        if not matches:
+            return requested
     return _single_detected_format(matches, "semantic segmentation")
 
 
@@ -591,10 +595,7 @@ def _voc_manifest_image_ids(voc_root: Path) -> list[str]:
                 f"VOC manifest.json images[{index}] must contain a file name"
             )
         image_id = Path(raw_file).stem
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+", image_id):
-            raise DatasetValidationError(
-                f"VOC manifest.json images[{index}] has an invalid image id"
-            )
+        _validate_voc_image_id(image_id, f"VOC manifest.json images[{index}]")
         ids.append(image_id)
     if not ids:
         raise DatasetValidationError("VOC manifest.json contains no images")
@@ -621,7 +622,10 @@ def _voc_segmentation_splits(voc_root: Path) -> dict[str, list[str]]:
     train_path = split_root / "train.txt"
     val_path = split_root / "val.txt"
     if train_path.is_file() and val_path.is_file():
-        splits = {"train": _split_ids(train_path), "val": _split_ids(val_path)}
+        splits = {
+            "train": _split_ids(train_path, preserve_spaces=True),
+            "val": _split_ids(val_path, preserve_spaces=True),
+        }
     elif train_path.is_file() or val_path.is_file():
         raise DatasetValidationError(
             "VOC segmentation must provide both train.txt and val.txt, or only default.txt"
@@ -632,7 +636,7 @@ def _voc_segmentation_splits(voc_root: Path) -> dict[str, list[str]]:
             raise DatasetValidationError(
                 "VOC segmentation requires train.txt + val.txt, or a CVAT default.txt split"
             )
-        ids = _split_ids(default_path)
+        ids = _split_ids(default_path, preserve_spaces=True)
         if len(ids) < 2:
             raise DatasetValidationError(
                 "VOC default.txt requires at least two samples for automatic train/val splitting"
@@ -845,24 +849,39 @@ def _unique_layout_root(matches: list[Path], label: str) -> Path:
     return matches[0]
 
 
-def _split_ids(path: Path) -> list[str]:
+def _split_ids(path: Path, *, preserve_spaces: bool = False) -> list[str]:
     if not path.is_file():
         raise DatasetValidationError(f"Required split file does not exist: {path}")
     values: list[str] = []
     for line_number, raw_line in enumerate(
         path.read_text(encoding="utf-8-sig").splitlines(), start=1
     ):
-        value = raw_line.strip().split(maxsplit=1)[0] if raw_line.strip() else ""
+        raw_value = raw_line.strip()
+        # Detection split files commonly append a ``0``/``1`` flag.  Segmentation
+        # exporters can instead use spaces inside the actual file stem, so that
+        # caller opts into preserving the complete line.
+        value = raw_value if preserve_spaces else raw_value.split(maxsplit=1)[0]
         if not value:
             continue
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
-            raise DatasetValidationError(f"{path.name}:{line_number} has an invalid image id")
+        _validate_voc_image_id(value, f"{path.name}:{line_number}")
         values.append(value)
     if not values:
         raise DatasetValidationError(f"{path} contains no image ids")
     if len(values) != len(set(values)):
         raise DatasetValidationError(f"{path} contains duplicate image ids")
     return values
+
+
+def _validate_voc_image_id(value: str, source: str) -> None:
+    if (
+        not value
+        or value in {".", ".."}
+        or "/" in value
+        or "\\" in value
+        or "\x00" in value
+        or any(ord(char) < 32 for char in value)
+    ):
+        raise DatasetValidationError(f"{source} has an invalid image id")
 
 
 def _voc_image(voc_root: Path, image_id: str, filename: str | None = None) -> Path:
@@ -979,10 +998,10 @@ def _write_yolo_config(output: Path, labels: tuple[str, ...]) -> None:
     )
 
 
-def _coco_annotation_candidates(root: Path, split: str) -> list[Path]:
+def _coco_annotation_candidates(root: Path, split: str | None = None) -> list[Path]:
     matches: list[Path] = []
     for path in root.rglob("*.json"):
-        if split not in path.stem.lower():
+        if split is not None and split not in path.stem.lower():
             continue
         try:
             payload: object = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -998,16 +1017,64 @@ def _coco_annotation_candidates(root: Path, split: str) -> list[Path]:
     return sorted(matches)
 
 
-def _coco_payload(root: Path, split: str) -> tuple[Path, dict[str, Any]]:
-    matches = _coco_annotation_candidates(root, split)
-    if len(matches) != 1:
-        raise DatasetValidationError(
-            f"COCO dataset must contain exactly one '{split}' annotation JSON, found {len(matches)}"
-        )
-    raw: object = json.loads(matches[0].read_text(encoding="utf-8-sig"))
+def _coco_payload(path: Path) -> dict[str, Any]:
+    raw: object = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(raw, dict):
-        raise DatasetValidationError(f"COCO annotation root must be an object: {matches[0]}")
-    return matches[0], cast(dict[str, Any], raw)
+        raise DatasetValidationError(f"COCO annotation root must be an object: {path}")
+    return cast(dict[str, Any], raw)
+
+
+def _coco_split_payloads(root: Path) -> dict[str, tuple[Path, dict[str, Any]]]:
+    train_matches = _coco_annotation_candidates(root, "train")
+    val_matches = _coco_annotation_candidates(root, "val")
+    if train_matches or val_matches:
+        if len(train_matches) != 1 or len(val_matches) != 1:
+            raise DatasetValidationError(
+                "COCO dataset must contain exactly one train and one val annotation JSON"
+            )
+        return {
+            "train": (train_matches[0], _coco_payload(train_matches[0])),
+            "val": (val_matches[0], _coco_payload(val_matches[0])),
+        }
+
+    generic_matches = _coco_annotation_candidates(root)
+    if len(generic_matches) != 1:
+        raise DatasetValidationError(
+            "COCO dataset must contain train/val annotation JSONs or exactly one "
+            "generic annotation JSON"
+        )
+    annotation_path = generic_matches[0]
+    payload = _coco_payload(annotation_path)
+    images = _mapping_list(payload.get("images"), "COCO images")
+    image_ids = [_integer(image.get("id"), "COCO image id") for image in images]
+    if len(image_ids) != len(set(image_ids)):
+        raise DatasetValidationError("COCO image ids must be unique")
+    if len(image_ids) < 2:
+        raise DatasetValidationError(
+            "COCO single annotation JSON requires at least two images for train/val splitting"
+        )
+    splits = _deterministic_train_val_split([str(image_id) for image_id in image_ids])
+    selected_ids = {split: {int(image_id) for image_id in ids} for split, ids in splits.items()}
+    annotations = _mapping_list(payload.get("annotations"), "COCO annotations")
+    annotation_rows = [
+        (annotation, _integer(annotation.get("image_id"), "COCO annotation image_id"))
+        for annotation in annotations
+    ]
+    result: dict[str, tuple[Path, dict[str, Any]]] = {}
+    for split in ("train", "val"):
+        split_payload = dict(payload)
+        split_payload["images"] = [
+            image
+            for image in images
+            if _integer(image.get("id"), "COCO image id") in selected_ids[split]
+        ]
+        split_payload["annotations"] = [
+            annotation
+            for annotation, image_id in annotation_rows
+            if image_id in selected_ids[split]
+        ]
+        result[split] = (annotation_path, split_payload)
+    return result
 
 
 def _coco_category_rows(payload: dict[str, Any]) -> list[tuple[int, str]]:
@@ -1031,8 +1098,7 @@ def _coco_category_rows(payload: dict[str, Any]) -> list[tuple[int, str]]:
 
 def _coco_dataset_labels(root: Path, *, segmentation: bool) -> tuple[str, ...]:
     expected: list[tuple[int, str]] | None = None
-    for split in ("train", "val"):
-        _, payload = _coco_payload(root, split)
+    for _, payload in _coco_split_payloads(root).values():
         rows = _coco_category_rows(payload)
         if expected is not None and rows != expected:
             raise DatasetValidationError(
@@ -1126,8 +1192,7 @@ def _resolve_coco_image(root: Path, annotation_path: Path, file_name: object) ->
 
 
 def _normalize_coco_detection(root: Path, output: Path, labels: tuple[str, ...]) -> None:
-    for split in ("train", "val"):
-        annotation_path, payload = _coco_payload(root, split)
+    for split, (annotation_path, payload) in _coco_split_payloads(root).items():
         category_indexes, images, annotations = _coco_contract(payload, labels, segmentation=False)
         if not images:
             raise DatasetValidationError(f"COCO '{split}' split contains no images")
@@ -1230,8 +1295,7 @@ def _copy_voc_segmentation_mask(
 
 def _normalize_coco_segmentation(root: Path, output: Path, labels: tuple[str, ...]) -> None:
     image_module, draw_module = _pillow_modules()
-    for split in ("train", "val"):
-        annotation_path, payload = _coco_payload(root, split)
+    for split, (annotation_path, payload) in _coco_split_payloads(root).items():
         category_indexes, images, annotations = _coco_contract(payload, labels, segmentation=True)
         if not images:
             raise DatasetValidationError(f"COCO '{split}' split contains no images")

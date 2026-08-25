@@ -11,10 +11,8 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-
 from workers.node_service.config import NodeServiceSettings
 from workers.node_service.enrollment import resolve_node_token
-
 
 LONG_LIVED_TOKEN = "long-lived-node-token-with-48-characters-value"
 ENROLLMENT_TOKEN = "one-time-enrollment-token-with-32-characters"

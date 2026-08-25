@@ -563,6 +563,57 @@ class InferenceService:
             record.status = ModelReleaseStatus.DEPRECATED.value
             return model_release_response(record)
 
+    def delete_release(self, release_id: str) -> None:
+        with self.context.database.session() as session:
+            record = self._release(session, release_id)
+            if record.status != ModelReleaseStatus.DEPRECATED.value:
+                raise ConflictError(
+                    "model_release_not_deletable",
+                    "Only deprecated model releases can be deleted",
+                    status=record.status,
+                )
+            task_ids = list(
+                session.scalars(
+                    select(InferenceTaskRecord.id).where(
+                        InferenceTaskRecord.release_id == release_id
+                    )
+                ).all()
+            )
+            secondary_task_ids = [
+                task.id
+                for task in session.scalars(select(InferenceTaskRecord)).all()
+                if release_id in self._secondary_release_ids(task.analytics_json)
+            ]
+            deployment_count = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(DeploymentRecord)
+                    .where(DeploymentRecord.release_id == release_id)
+                )
+                or 0
+            )
+            target_count = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(DeploymentTargetRecord)
+                    .where(
+                        (DeploymentTargetRecord.release_id == release_id)
+                        | (DeploymentTargetRecord.previous_release_id == release_id)
+                    )
+                )
+                or 0
+            )
+            referenced_task_ids = sorted(set(task_ids + secondary_task_ids))
+            if referenced_task_ids or deployment_count or target_count:
+                raise ConflictError(
+                    "model_release_in_use",
+                    "Delete referencing inference tasks and deployment history first",
+                    taskIds=referenced_task_ids,
+                    deploymentCount=deployment_count,
+                    deploymentTargetCount=target_count,
+                )
+            session.delete(record)
+
     def create_node_group(self, payload: NodeGroupCreate) -> NodeGroupResponse:
         with self.context.database.session() as session:
             duplicate = session.scalar(
@@ -1024,8 +1075,40 @@ class InferenceService:
                 **payload.metadata,
                 "metrics": payload.metrics,
             }
+            self._reconcile_task_revisions(session, record, payload)
             self._finish_stopped_rollbacks(session, record)
             return self._node_response(record)
+
+    def _reconcile_task_revisions(
+        self,
+        session: Session,
+        node: InferenceNodeRecord,
+        payload: InferenceNodeHeartbeat,
+    ) -> None:
+        deploying = session.scalars(
+            select(InferenceTaskRecord).where(
+                InferenceTaskRecord.node_id == node.id,
+                InferenceTaskRecord.status == InferenceTaskStatus.DEPLOYING.value,
+            )
+        ).all()
+        for task in deploying:
+            tracked = session.scalar(
+                select(DeploymentTargetRecord.id).where(
+                    DeploymentTargetRecord.node_id == node.id,
+                    DeploymentTargetRecord.task_id == task.id,
+                    DeploymentTargetRecord.desired_revision == task.config_revision,
+                )
+            )
+            if tracked is not None:
+                continue
+            if payload.failed_revision == task.config_revision:
+                task.status = InferenceTaskStatus.FAILED.value
+                task.error_message = f"Revision {task.config_revision} failed on the inference node"
+                node.deployment_status = "failed"
+            elif payload.actual_revision >= task.config_revision:
+                task.status = InferenceTaskStatus.RUNNING.value
+                task.error_message = None
+                node.deployment_status = "idle"
 
     def approve_node(self, node_id: str) -> InferenceNodeResponse:
         with self.context.database.session() as session:
@@ -1281,7 +1364,7 @@ class InferenceService:
         MediaService(self.context).close_task_stream(task_id)
         return response
 
-    def restart_task(self, task_id: str) -> DeploymentResponse:
+    def restart_task(self, task_id: str) -> InferenceTaskResponse:
         with self.context.database.session() as session:
             task = self._task(session, task_id)
             if task.status not in {
@@ -1294,6 +1377,9 @@ class InferenceService:
                     taskId=task.id,
                     status=task.status,
                 )
+            release = self._published_release(session, task.release_id)
+            node = self._validate_task_for_deployment(session, task, release)
+            self._validate_node_runtime_plan(session, node, [task], release.id)
             previous_status = task.status
             reserved = (
                 session.query(InferenceTaskRecord)
@@ -1313,19 +1399,14 @@ class InferenceService:
                     taskId=task.id,
                     status=previous_status,
                 )
+            node.desired_revision += 1
+            node.deployment_status = "deploying"
             task.status = InferenceTaskStatus.DEPLOYING.value
-            payload = DeploymentCreate(
-                name=f"Restart {task.name}"[:120],
-                release_id=task.release_id,
-                task_ids=[task.id],
-                strategy="all_at_once",
-                batch_size=1,
-            )
-            return self._create_deployment(
-                session,
-                payload,
-                previous_task_statuses={task.id: previous_status},
-            )
+            task.config_revision = node.desired_revision
+            task.error_message = None
+            MediaService(self.context).ensure_publish_credential(session, task)
+            session.flush()
+            return self._task_response(session, task)
 
     def retire_task(self, task_id: str) -> InferenceTaskResponse:
         with self.context.database.session() as session:
@@ -2019,22 +2100,7 @@ class InferenceService:
                     taskId=task.id,
                     status=task.status,
                 )
-            node = self._node(session, task.node_id)
-            if task.media_migration_required:
-                raise ConflictError(
-                    "media_migration_required",
-                    "Select a managed media gateway and stream before deployment",
-                    taskId=task.id,
-                )
-            self._validate_node_release(node, release.adapter)
-            self._validate_node_media(node, task.media_json)
-            MediaService(self.context).validate_task_media(
-                session, task.media_json, task_id=task.id
-            )
-            secondary_releases = self._validate_task_analytics(
-                session, task.analytics_json, release, task.media_json
-            )
-            self._validate_node_analytics(node, task.analytics_json, secondary_releases)
+            node = self._validate_task_for_deployment(session, task, release)
             tasks_by_node.setdefault(node.id, []).append(task)
         for node_id, node_tasks in tasks_by_node.items():
             self._validate_node_runtime_plan(
@@ -2079,6 +2145,30 @@ class InferenceService:
         session.flush()
         self._activate_next_batch(session, deployment)
         return self._deployment_response(session, deployment)
+
+    def _validate_task_for_deployment(
+        self,
+        session: Session,
+        task: InferenceTaskRecord,
+        release: ModelReleaseRecord,
+    ) -> InferenceNodeRecord:
+        node = self._node(session, task.node_id)
+        if task.media_migration_required:
+            raise ConflictError(
+                "media_migration_required",
+                "Select a managed media gateway and stream before deployment",
+                taskId=task.id,
+            )
+        self._validate_node_release(node, release.adapter)
+        self._validate_node_media(node, task.media_json)
+        MediaService(self.context).validate_task_media(
+            session, task.media_json, task_id=task.id
+        )
+        secondary_releases = self._validate_task_analytics(
+            session, task.analytics_json, release, task.media_json
+        )
+        self._validate_node_analytics(node, task.analytics_json, secondary_releases)
+        return node
 
     def _select_node(
         self,

@@ -28,22 +28,10 @@ fi
 
 default_version() {
   case "$1" in
-    platform) echo "2026.08.20" ;;
-    trainer-*) echo "2026.08.20" ;;
-    converter|inference|rk3588) echo "2026.08.20-business" ;;
-    *) echo "2026.08.20" ;;
-  esac
-}
-
-version="${RKNODE_RELEASE_VERSION:-$(default_version "${role}")}"
-revision="${RKNODE_SOURCE_REVISION:-source-tree-${version}}"
-
-default_version() {
-  case "$1" in
-    platform) echo "2026.08.20" ;;
-    trainer-*) echo "2026.08.20" ;;
-    converter|inference|rk3588) echo "2026.08.20-business" ;;
-    *) echo "2026.08.20" ;;
+    platform) echo "2026.08.24" ;;
+    trainer-*) echo "2026.08.24" ;;
+    converter|inference|rk3588) echo "2026.08.24-business" ;;
+    *) echo "2026.08.24" ;;
   esac
 }
 

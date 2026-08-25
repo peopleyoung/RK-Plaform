@@ -4,6 +4,7 @@ import { chromium } from 'playwright'
 const baseUrl = process.env.PROTOTYPE_URL ?? 'http://127.0.0.1:5173'
 const browser = await chromium.launch({ headless: true })
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
+page.addInitScript(() => sessionStorage.setItem('rknode.adminToken', 'admin'))
 const errors = []
 
 page.on('console', (message) => {
@@ -118,9 +119,11 @@ await page.route('**/api/v1/datasets', async (route) => {
     return
   }
   const response = await route.fetch()
-  const datasets = await response.json()
+  const payload = await response.json()
+  const datasets = Array.isArray(payload) ? payload : payload.items
+  if (!Array.isArray(datasets)) throw new Error('datasets fixture expects an array or paginated items')
   if (!datasets.some((item) => item.id === smokeDataset.id)) datasets.push(smokeDataset)
-  await route.fulfill({ response, json: datasets })
+  await route.fulfill({ response, json: Array.isArray(payload) ? datasets : { ...payload, items: datasets, total: datasets.length } })
 })
 await page.route('**/api/v1/jobs', async (route) => {
   const request = route.request()
@@ -180,10 +183,12 @@ await page.route('**/api/v1/artifacts', async (route) => {
     return
   }
   const response = await route.fetch()
-  const artifacts = await response.json()
+  const payload = await response.json()
+  const artifacts = Array.isArray(payload) ? payload : payload.items
+  if (!Array.isArray(artifacts)) throw new Error('artifacts fixture expects an array or paginated items')
   if (!artifacts.some((item) => item.id === smokeSourceArtifact.id)) artifacts.push(smokeSourceArtifact)
   if (!artifacts.some((item) => item.id === smokeOutputArtifact.id)) artifacts.push(smokeOutputArtifact)
-  await route.fulfill({ response, json: artifacts })
+  await route.fulfill({ response, json: Array.isArray(payload) ? artifacts : { ...payload, items: artifacts, total: artifacts.length } })
 })
 await page.route('**/api/v1/model-releases**', async (route) => {
   const request = route.request()
@@ -413,10 +418,10 @@ assert.equal(await datasetDialog.getByLabel(/类别名称/).count(), 0)
 await datasetDialog.getByLabel(/数据格式/).selectOption('coco_detection')
 assert.equal(await datasetDialog.getByLabel(/数据格式/).inputValue(), 'coco_detection')
 await datasetDialog.getByLabel(/任务类型/).selectOption('semantic_segmentation')
-assert.equal(await datasetDialog.getByLabel(/数据格式/).inputValue(), 'mask_pairs')
+assert.equal(await datasetDialog.getByLabel(/数据格式/).inputValue(), 'auto')
 assert.deepEqual(
   await datasetDialog.getByLabel(/数据格式/).locator('option').allTextContents(),
-  ['图像/掩码配对', 'COCO 分割', 'Pascal VOC 分割'],
+  ['自动识别', '图像/掩码配对', 'COCO 分割', 'Pascal VOC 分割'],
 )
 await page.getByRole('button', { name: '取消' }).click()
 await page.getByLabel('每页数量').selectOption('20')
@@ -497,6 +502,7 @@ const unexpectedErrors = errors.filter((error) => ![
 assert.deepEqual(unexpectedErrors, [])
 
 const artifactPage = await browser.newPage({ viewport: { width: 1440, height: 900 } })
+artifactPage.addInitScript(() => sessionStorage.setItem('rknode.adminToken', 'admin'))
 let resolveArtifactJob
 const artifactJobPromise = new Promise((resolve) => { resolveArtifactJob = resolve })
 const sourceDataset = {
@@ -505,7 +511,9 @@ const sourceDataset = {
 }
 await artifactPage.route('**/api/v1/jobs', async (route) => {
   const response = await route.fetch()
-  const jobs = await response.json()
+  const payload = await response.json()
+  const jobs = Array.isArray(payload) ? payload : payload.items
+  if (!Array.isArray(jobs)) throw new Error('jobs fixture expects an array or paginated items')
   let artifactJobIndex = jobs.findIndex((item) => item.type === 'training' && item.status === 'succeeded')
   if (artifactJobIndex < 0) {
     jobs.push(smokeTrainingJob)
@@ -514,13 +522,15 @@ await artifactPage.route('**/api/v1/jobs', async (route) => {
   const artifactJob = { ...jobs[artifactJobIndex], datasetId: sourceDataset.id }
   jobs[artifactJobIndex] = artifactJob
   resolveArtifactJob(artifactJob)
-  await route.fulfill({ response, json: jobs })
+  await route.fulfill({ response, json: Array.isArray(payload) ? jobs : { ...payload, items: jobs, total: jobs.length } })
 })
 await artifactPage.route('**/api/v1/datasets', async (route) => {
   const response = await route.fetch()
-  const datasets = await response.json()
+  const payload = await response.json()
+  const datasets = Array.isArray(payload) ? payload : payload.items
+  if (!Array.isArray(datasets)) throw new Error('datasets fixture expects an array or paginated items')
   datasets.push(sourceDataset)
-  await route.fulfill({ response, json: datasets })
+  await route.fulfill({ response, json: Array.isArray(payload) ? datasets : { ...payload, items: datasets, total: datasets.length } })
 })
 await artifactPage.route('**/api/v1/artifacts/artifact_ui_checkpoint/download', (route) => route.fulfill({
   status: 200,
@@ -529,10 +539,13 @@ await artifactPage.route('**/api/v1/artifacts/artifact_ui_checkpoint/download', 
 }))
 await artifactPage.route('**/api/v1/artifacts', async (route) => {
   const [response, artifactJob] = await Promise.all([route.fetch(), artifactJobPromise])
-  const artifacts = (await response.json()).filter((item) => item.jobId !== artifactJob.id || !['onnx', 'training_checkpoint'].includes(item.kind))
+  const payload = await response.json()
+  const sourceArtifacts = Array.isArray(payload) ? payload : payload.items
+  if (!Array.isArray(sourceArtifacts)) throw new Error('artifacts fixture expects an array or paginated items')
+  const artifacts = sourceArtifacts.filter((item) => item.jobId !== artifactJob.id || !['onnx', 'training_checkpoint'].includes(item.kind))
   artifacts.push({ id: 'artifact_ui_onnx', jobId: artifactJob.id, kind: 'onnx', filename: 'yolov8n-640x640.onnx', mediaType: 'application/octet-stream', sizeBytes: 10, sha256: '0'.repeat(64), manifest: smokeManifest, createdAt: new Date().toISOString() })
   artifacts.push({ id: 'artifact_ui_checkpoint', jobId: artifactJob.id, kind: 'training_checkpoint', filename: 'yolov8n-640x640.pt', mediaType: 'application/octet-stream', sizeBytes: 10, sha256: '0'.repeat(64), manifest: null, createdAt: new Date().toISOString() })
-  await route.fulfill({ response, json: artifacts })
+  await route.fulfill({ response, json: Array.isArray(payload) ? artifacts : { ...payload, items: artifacts, total: artifacts.length } })
 })
 await artifactPage.goto(`${baseUrl}/#/training`)
 const artifactJob = await artifactJobPromise

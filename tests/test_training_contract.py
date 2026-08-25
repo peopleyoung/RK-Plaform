@@ -16,6 +16,7 @@ from workers.trainer.archive import ExtractionLimits, UnsafeArchiveError, extrac
 from workers.trainer.dataset import (
     DatasetValidationError,
     prepare_training_dataset,
+    validate_deeplab_dataset,
     validate_ppocr_dataset,
     validate_yolo_dataset,
 )
@@ -359,6 +360,51 @@ def test_coco_detection_is_normalized_to_yolo(tmp_path: Path) -> None:
     )
 
 
+def test_coco_detection_default_annotation_is_split_deterministically(tmp_path: Path) -> None:
+    dataset = tmp_path / "dataset"
+    (dataset / "annotations").mkdir(parents=True)
+    (dataset / "images").mkdir()
+    image_rows = []
+    annotations = []
+    for index in range(1, 6):
+        image_name = f"frame_{index:03d}.jpg"
+        (dataset / "images" / image_name).write_bytes(b"fixture")
+        image_rows.append(
+            {"id": index, "file_name": f"images/{image_name}", "width": 100, "height": 50}
+        )
+        annotations.append(
+            {"id": index, "image_id": index, "category_id": 4, "bbox": [10, 5, 20, 20]}
+        )
+    (dataset / "annotations" / "instances_default.json").write_text(
+        json.dumps(
+            {
+                "images": image_rows,
+                "categories": [{"id": 4, "name": "target"}],
+                "annotations": annotations,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    prepared = prepare_training_dataset(
+        "yolo-detect",
+        dataset,
+        (),
+        "coco_detection",
+        tmp_path / "normalized",
+    )
+
+    train_images = sorted((prepared.root / "images" / "train").glob("*.jpg"))
+    val_images = sorted((prepared.root / "images" / "val").glob("*.jpg"))
+    assert prepared.labels == ("target",)
+    assert len(train_images) == 4
+    assert len(val_images) == 1
+    assert {path.stem for path in train_images + val_images} == {
+        f"{index}" for index in range(1, 6)
+    }
+    validate_yolo_dataset(prepared.root, prepared.labels)
+
+
 def test_voc_segmentation_is_normalized_to_mask_pairs(tmp_path: Path) -> None:
     dataset = tmp_path / "dataset" / "VOC2012"
     (dataset / "JPEGImages").mkdir(parents=True)
@@ -434,6 +480,17 @@ def test_cvat_voc_segmentation_uses_default_split_and_rgb_labelmap(tmp_path: Pat
             assert colors is not None
             assert {color for _, color in colors} == {0, 1}
 
+    mislabeled = prepare_training_dataset(
+        "deeplabv3plus",
+        dataset,
+        (),
+        "mask_pairs",
+        tmp_path / "normalized-mislabeled",
+    )
+    assert mislabeled.labels == prepared.labels
+    assert len(list((mislabeled.root / "images" / "train").glob("*.jpg"))) == 4
+    assert len(list((mislabeled.root / "masks" / "val").glob("*.png"))) == 1
+
     label_map_path.unlink()
     with pytest.raises(DatasetValidationError, match=r"RGB masks require.*labelmap.txt"):
         prepare_training_dataset(
@@ -458,6 +515,51 @@ def test_cvat_voc_segmentation_uses_default_split_and_rgb_labelmap(tmp_path: Pat
         )
 
 
+def test_voc_segmentation_preserves_spaces_in_sample_ids(tmp_path: Path) -> None:
+    dataset = tmp_path / "dataset" / "VOC2012"
+    (dataset / "JPEGImages").mkdir(parents=True)
+    (dataset / "SegmentationClass").mkdir()
+    (dataset / "ImageSets" / "Segmentation").mkdir(parents=True)
+    image_ids = (
+        "Image_2026_05_27 14_18_04_937_polar",
+        "Image_2026_05_27 14_18_06_554_polar",
+        "Image_2026_05_27 14_18_08_148_polar",
+    )
+    for image_id in image_ids:
+        Image.new("RGB", (4, 4), color="white").save(
+            dataset / "JPEGImages" / f"{image_id}.png"
+        )
+        Image.new("P", (4, 4), color=1).save(
+            dataset / "SegmentationClass" / f"{image_id}.png"
+        )
+    (dataset / "ImageSets" / "Segmentation" / "default.txt").write_text(
+        "\n".join(image_ids) + "\n", encoding="utf-8"
+    )
+
+    prepared = prepare_training_dataset(
+        "deeplabv3plus",
+        tmp_path / "dataset",
+        (),
+        "voc_segmentation",
+        tmp_path / "normalized",
+    )
+
+    assert prepared.labels == ("background", "class_1")
+    normalized_ids = {
+        path.stem for path in (prepared.root / "images").rglob("*.png")
+    }
+    assert normalized_ids == set(image_ids)
+
+    automatic = prepare_training_dataset(
+        "deeplabv3plus",
+        tmp_path / "dataset",
+        (),
+        "auto",
+        tmp_path / "normalized-auto",
+    )
+    assert automatic.labels == prepared.labels
+
+
 def test_mask_pair_segmentation_preserves_palette_class_ids(tmp_path: Path) -> None:
     dataset = tmp_path / "dataset" / "nested"
     for split in ("train", "val"):
@@ -478,6 +580,16 @@ def test_mask_pair_segmentation_preserves_palette_class_ids(tmp_path: Path) -> N
 
     assert prepared.root == dataset
     assert prepared.labels == ("background", "class_1")
+
+    automatic = prepare_training_dataset(
+        "deeplabv3plus",
+        tmp_path / "dataset",
+        (),
+        "auto",
+        tmp_path / "normalized-auto",
+    )
+    assert automatic.root == dataset
+    assert automatic.labels == prepared.labels
 
     (dataset / "classes.txt").write_text("background\ntarget\n", encoding="utf-8")
     named = prepare_training_dataset(
@@ -543,6 +655,64 @@ def test_coco_segmentation_polygon_and_rle_are_normalized(tmp_path: Path) -> Non
     with Image.open(prepared.root / "masks" / "val" / "2.png") as val_mask:
         assert val_mask.getpixel((0, 0)) == 1
         assert val_mask.getpixel((1, 0)) == 0
+
+    automatic = prepare_training_dataset(
+        "deeplabv3plus",
+        dataset,
+        (),
+        "auto",
+        tmp_path / "normalized-auto",
+    )
+    assert automatic.labels == prepared.labels
+
+
+def test_coco_segmentation_default_annotation_is_split_deterministically(tmp_path: Path) -> None:
+    dataset = tmp_path / "dataset"
+    (dataset / "annotations").mkdir(parents=True)
+    (dataset / "images").mkdir()
+    image_rows = []
+    annotations = []
+    for index in range(1, 6):
+        image_name = f"frame_{index:03d}.png"
+        Image.new("RGB", (4, 4), color="white").save(dataset / "images" / image_name)
+        image_rows.append(
+            {"id": index, "file_name": f"images/{image_name}", "width": 4, "height": 4}
+        )
+        annotations.append(
+            {
+                "id": index,
+                "image_id": index,
+                "category_id": 7,
+                "segmentation": [[0, 0, 3, 0, 3, 3, 0, 3]],
+            }
+        )
+    (dataset / "annotations" / "instances_default.json").write_text(
+        json.dumps(
+            {
+                "images": image_rows,
+                "categories": [{"id": 7, "name": "target"}],
+                "annotations": annotations,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    prepared = prepare_training_dataset(
+        "deeplabv3plus",
+        dataset,
+        (),
+        "coco_segmentation",
+        tmp_path / "normalized",
+    )
+
+    train_images = sorted((prepared.root / "images" / "train").glob("*.png"))
+    val_images = sorted((prepared.root / "images" / "val").glob("*.png"))
+    assert prepared.labels == ("background", "target")
+    assert len(train_images) == 4
+    assert len(val_images) == 1
+    assert len(list((prepared.root / "masks" / "train").glob("*.png"))) == 4
+    assert len(list((prepared.root / "masks" / "val").glob("*.png"))) == 1
+    validate_deeplab_dataset(prepared.root, prepared.labels)
 
 
 def test_explicit_dataset_format_must_match_training_profile(tmp_path: Path) -> None:

@@ -21,14 +21,14 @@ export const datasetFormatLabels: Record<DatasetFormat, string> = {
 
 export const datasetFormatsByTask: Record<TaskType, DatasetFormat[]> = {
   object_detection: ['yolo', 'coco_detection', 'voc_detection'],
-  semantic_segmentation: ['mask_pairs', 'coco_segmentation', 'voc_segmentation'],
+  semantic_segmentation: ['auto', 'mask_pairs', 'coco_segmentation', 'voc_segmentation'],
   ocr_detection: ['ppocr_detection'],
   ocr_recognition: ['ppocr_recognition'],
 }
 
 export const defaultDatasetFormat: Record<TaskType, DatasetFormat> = {
   object_detection: 'yolo',
-  semantic_segmentation: 'mask_pairs',
+  semantic_segmentation: 'auto',
   ocr_detection: 'ppocr_detection',
   ocr_recognition: 'ppocr_recognition',
 }

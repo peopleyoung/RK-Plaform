@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import Engine, create_engine, event, inspect, select, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -71,12 +71,15 @@ class Database:
             with self.session() as session:
                 tasks = session.scalars(select(InferenceTaskRecord)).all()
                 for task in tasks:
-                    media = task.media_json if isinstance(task.media_json, dict) else {}
-                    zlm = media.get("zlmSei")
+                    media = task.media_json or {}
+                    raw_zlm: object = media.get("zlmSei")
+                    zlm = (
+                        cast(dict[str, object], raw_zlm)
+                        if isinstance(raw_zlm, dict)
+                        else {}
+                    )
                     task.media_migration_required = bool(
-                        isinstance(zlm, dict)
-                        and zlm.get("outputUri")
-                        and not zlm.get("gatewayId")
+                        zlm.get("outputUri") and not zlm.get("gatewayId")
                     )
         endpoint_columns = {
             column["name"] for column in inspect(self.engine).get_columns("service_endpoints")

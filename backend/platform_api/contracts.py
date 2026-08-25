@@ -826,6 +826,7 @@ class InferenceNodeRegistrationResponse(ApiModel):
 
 class InferenceNodeHeartbeat(ApiModel):
     actual_revision: int = Field(default=0, ge=0)
+    failed_revision: int | None = Field(default=None, ge=0)
     health: InferenceNodeHealth = InferenceNodeHealth.HEALTHY
     self_test_passed: bool = False
     runtime_version: str | None = Field(default=None, min_length=1, max_length=80)
@@ -947,9 +948,8 @@ class InferenceTaskCreate(ApiModel):
             or not 100 <= message_timeout <= 60000
         ):
             raise ValueError("media.kafka.messageTimeoutMs must be between 100 and 60000")
-        if zlm.get("enabled") is True:
-            if decoder != "rkmpp":
-                raise ValueError("ZLM SEI requires the RKMPP decoder")
+        if zlm.get("enabled") is True and decoder != "rkmpp":
+            raise ValueError("ZLM SEI requires the RKMPP decoder")
         if (
             not isinstance(reconnect, int)
             or isinstance(reconnect, bool)

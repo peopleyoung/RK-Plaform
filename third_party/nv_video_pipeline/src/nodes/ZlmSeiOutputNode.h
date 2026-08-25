@@ -10,6 +10,7 @@ extern "C" {
 
 #include "PacketMeta.h"
 #include "ProcessNode.h"
+#include "TimestampNormalizer.h"
 
 namespace Node {
 
@@ -42,6 +43,7 @@ private:
     uint32_t         consecutive_failures_{0};
     uint64_t         publish_failure_count_{0};
     uint64_t         sei_skipped_count_{0};
+    media::TimestampNormalizer timestamp_normalizer_;
 };
 
 }  // namespace Node

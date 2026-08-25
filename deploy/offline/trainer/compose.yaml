@@ -7,7 +7,7 @@ x-rknode-logging: &rknode-logging
 
 services:
   trainer:
-    image: rknode-trainer-torch-cpu:2026.08.20
+    image: rknode-trainer-torch-cpu:2026.08.24
     pull_policy: never
     entrypoint: []
     command: ["python", "-m", "workers.node_service.main"]

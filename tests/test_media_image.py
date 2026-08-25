@@ -101,7 +101,7 @@ def test_online_compose_owns_media_ports_health_and_secret_boundaries() -> None:
     services = compose["services"]
     assert set(services) == {"api", "frontend", "media"}
     media = services["media"]
-    assert media["image"] == "rknode-platform-media:2026.08.20"
+    assert media["image"] == "rknode-platform-media:2026.08.24"
     assert media["ports"] == ["8554:554", "8081:80"]
     assert media["restart"] == "unless-stopped"
     assert "healthcheck" in media

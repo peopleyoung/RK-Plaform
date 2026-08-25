@@ -45,7 +45,7 @@ def validate_media_host(value: str) -> str:
         ipaddress.ip_address(candidate)
     except ValueError:
         if HOSTNAME_PATTERN.fullmatch(candidate) is None or ".." in candidate:
-            raise ValueError("media host must be an IP address or DNS hostname")
+            raise ValueError("media host must be an IP address or DNS hostname") from None
     return candidate
 
 

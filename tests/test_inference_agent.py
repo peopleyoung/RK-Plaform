@@ -31,7 +31,9 @@ class FakeClient(InferenceAgentClient):
         target.write_bytes(self.source)
         return hashlib.sha256(self.source).hexdigest()
 
-    def report_target(self, node_id: str, target_id: str, payload: dict[str, object]) -> dict[str, object]:
+    def report_target(
+        self, node_id: str, target_id: str, payload: dict[str, object]
+    ) -> dict[str, object]:
         self.states.append(str(payload["state"]))
         return {}
 
@@ -95,6 +97,56 @@ def test_agent_downloads_verifies_and_reports_all_deployment_stages(tmp_path: Pa
     agent.reconcile_once()
 
     assert client.download_count == 1
+
+
+def test_agent_applies_task_revision_without_deployment_target(tmp_path: Path) -> None:
+    content = b"restart-rknn"
+    client = FakeClient(content)
+    settings = AgentSettings(
+        api_url="http://platform.test/api/v1",
+        node_id="inode_test",
+        registration_token="",
+        hardware_id="board",
+        runtime_version="runtime",
+        driver_version="driver",
+        pipeline_version="pipeline",
+        adapters=("deeplab_logits_v1",),
+        model_dir=tmp_path / "models",
+        state_dir=tmp_path / "state",
+        poll_seconds=1,
+        command="",
+    )
+    agent = InferenceAgent(settings, client)
+    client.desired_payload = {
+        "revision": 5,
+        "releases": [
+            {
+                "id": "release_test",
+                "adapter": "deeplab_logits_v1",
+                "artifact": {
+                    "id": "artifact_test",
+                    "filename": "model.rknn",
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                },
+                "manifest": {"outputContract": "semantic_logits_nchw_v1"},
+            }
+        ],
+        "tasks": [
+            {
+                "id": "task_test",
+                "deploymentTargetId": None,
+                "releaseId": "release_test",
+                "inputUri": "rtsp://camera",
+            }
+        ],
+    }
+
+    agent.reconcile_once()
+
+    assert client.states == []
+    assert client.download_count == 1
+    assert client.heartbeats[-1]["actualRevision"] == 5
+    assert "failedRevision" not in client.heartbeats[-1]
 
 
 def test_agent_keeps_actual_revision_when_activation_fails(tmp_path: Path) -> None:
