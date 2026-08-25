@@ -4,13 +4,30 @@
 
 ## 1. 部署拓扑
 
-中央平台示例地址为 `172.16.66.249:5173`，API 在容器内监听 8000，Media 对外提供 RTSP `8554` 和 WS-FLV `8081`。节点服务统一监听节点宿主机地址映射的 10081/10082：训练节点示例 `172.16.66.249:10081`，板端转换/推理示例 `172.30.82.12:10081`、`172.30.82.12:10082`。历史 SSH 隧道示例为 `172.29.0.1:11081`、`172.29.0.1:11082`，仅用于临时联通性验证。
+中央平台示例地址为 `172.16.66.249:5173`，API 在容器内监听 8000，Media 对外提供 RTSP `8554` 和 WS-FLV `8081`。节点服务统一监听节点宿主机地址映射的 10081/10082：训练节点示例 `172.16.66.249:10081`，板端直连地址为 `172.30.82.12:10081`、`172.30.82.12:10082`。当前现网仍通过中央主机 SSH 隧道 `172.29.0.1:11081`、`172.29.0.1:11082` 探活；直连端口恢复后再切换 Endpoint，隧道只作为应急连接方式维护。
 
 节点的服务地址填写节点宿主机 IP 和端口；`RKNODE_PLATFORM_URL` 填中央平台地址，不是节点自身地址。平台创建 Endpoint 后取得 `RKNODE_ENDPOINT_ID` 和一次性注册码，注册码写入对应的 `./secrets/*-enrollment-token` 文件，权限设为 0600。
 
 基础 Compose 使用 `RKNODE_NODE_TOKEN_FILE` 保存注册后的长期凭证；首次启动 overlay 通过 `RKNODE_ENROLLMENT_TOKEN_FILE` 只读挂载一次性注册码。
 
-## 2. 中央平台
+## 2. 推理媒体链路
+
+RK3588 推理镜像内置 10 类可注册算子：`VideoCaptureNode`、`RkMppCaptureNode`、`InferNode`、`ByteTrackNode`、`SecondaryInferNode`、`AnalyticsNode`、`EventOutputNode`、`JsonOutputNode`、`KafkaOutputNode` 和 `ZlmSeiOutputNode`。
+
+单个任务不会固定启用全部算子。平台根据任务的 `media` 和 `analytics` 配置，在每次 desired revision 中生成动态图：
+
+~~~text
+Capture -> 主推理 -> [ByteTrack] -> [二级推理] -> [区域/越线] -> [事件]
+                                      └-> JSONL/HTTP
+                                      └-> [Kafka]
+                                      └-> [ZLM SEI]
+~~~
+
+其中 `decoder=rkmpp` 才能使用 RKMPP 硬解码、事件录像和 ZLM SEI；ByteTrack、区域/越线分析和二级推理仅适用于 YOLO 检测任务。`AnalyticsNode` 同时承载区域和越线规则，`EventOutputNode` 同时承载事件抓拍和录像，Kafka 与 ZLM SEI 是独立输出分支。旧任务的空 `media` 配置仍使用 OpenCV + JSON 兼容链路。
+
+当前在线部署版本为 API/Web `2026.08.25`、Media `2026.08.24`、RK3588 转换/推理 `2026.08.25-business`；训练镜像仍按角色使用 `2026.08.24`。离线包版本独立维护，执行前以包内 `VERSION` 和 `manifest.json` 为准。
+
+## 3. 中央平台
 
 在仓库根目录编辑 [deploy/compose.yaml](deploy/compose.yaml)：
 
@@ -28,7 +45,7 @@ docker compose -f deploy/compose.yaml ps
 
 浏览器打开 `http://<中央服务器IP>:5173`，登录令牌就是 Compose 中 `admin-token` 的值。升级时使用 `up -d --no-build --force-recreate`，不要删除 `platform-data`、`media-data` 和 `media-logs` 卷。
 
-## 3. 节点注册
+## 4. 节点注册
 
 在平台的节点管理页创建 Endpoint，记录 Endpoint ID、节点类型、加速器和一次性注册码。将 Endpoint ID 写入节点 Compose 的 `RKNODE_ENDPOINT_ID`，将中央平台写入 `RKNODE_PLATFORM_URL`。节点端口由 Compose 的 `ports` 决定，平台登记的服务地址应填写节点宿主机 IP 加端口，例如训练 `172.16.66.249:10081`，板端转换 `172.30.82.12:10081`、推理 `172.30.82.12:10082`。
 
@@ -62,7 +79,7 @@ docker compose -p rknode-rk3588 -f compose.yaml down
 docker compose -p rknode-rk3588 -f compose.yaml up -d --no-build
 ~~~
 
-## 4. 训练运行时选择
+## 5. 训练运行时选择
 
 默认训练 Compose 使用 Torch CPU。需要其他运行时，叠加一个固定配置文件：
 
@@ -73,7 +90,7 @@ docker compose -f deploy/nodes/trainer/compose.yaml \
 
 可选文件为 `compose.torch-cpu.yaml`、`compose.torch-cuda.yaml`、`compose.paddle-cpu.yaml`、`compose.paddle-cuda.yaml`。CUDA 主机必须安装 NVIDIA Container Toolkit；Paddle 版本和设备能力以对应 YAML 为准。
 
-## 5. 运维命令
+## 6. 运维命令
 
 ~~~bash
 docker compose -f deploy/compose.yaml logs -f --tail=200 api frontend media
@@ -84,7 +101,7 @@ docker compose -f deploy/compose.yaml down
 
 节点不能直接暴露公网，优先使用同一内网或 VPN。没有证书时使用受控 IP:端口访问；临时 SSH 隧道只能由跳板机建立，禁止把 SSH 密码写入脚本或镜像，且不得保存 SSH 密码。
 
-## 6. 离线部署
+## 7. 离线部署
 
 使用 `scripts/package_offline_bundle.py` 生成归档。归档包含固定版本镜像、`manifest.json`、Compose 文件和脚本，不包含 `.env` 或注册码。目标机解包后直接编辑 Compose 中的 `replace-with-*` 和 `CENTRAL_SERVER_IP`，再运行：
 

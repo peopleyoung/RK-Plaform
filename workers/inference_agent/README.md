@@ -22,6 +22,15 @@ once for the desired revision. This prevents a later release from replacing an
 earlier release on the same board. An empty `RKNODE_RELEASE_CONFIGS=[]` is a real
 activation that stops the local pipeline.
 
+The runtime registers ten graph node types: `VideoCaptureNode`,
+`RkMppCaptureNode`, `InferNode`, `ByteTrackNode`, `SecondaryInferNode`,
+`AnalyticsNode`, `EventOutputNode`, `JsonOutputNode`, `KafkaOutputNode`, and
+`ZlmSeiOutputNode`. A desired revision instantiates only the nodes required by
+each task's `media` and `analytics` configuration. RKMPP/ZLM SEI and event
+recording require RTSP input; ByteTrack, area/line analytics, and secondary
+inference are YOLO-only features. JSON, Kafka, and ZLM SEI are independent
+output branches.
+
 Run on the board:
 
 ```bash

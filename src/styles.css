@@ -433,6 +433,7 @@ body.modal-open { overflow: hidden; }
 .form-section:last-child { padding-bottom: 0; border-bottom: 0; }
 .form-section h3 { display: flex; align-items: center; gap: 7px; margin: 0 0 13px; color: #35413e; font-size: 11px; }
 .form-section h3 svg { color: var(--accent); }
+.field-hint { margin-top: 8px; color: var(--muted); font-size: 9px; }
 .model-choice-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; }
 .model-choice { min-width: 0; height: 58px; display: grid; grid-template-columns: 31px 1fr 16px; align-items: center; gap: 7px; padding: 7px; border: 1px solid var(--line); border-radius: 6px; background: #fff; cursor: pointer; text-align: left; }
 .model-choice:hover { border-color: #a9b8b3; }

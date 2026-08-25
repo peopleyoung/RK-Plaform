@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Check, CloudDownload, Container, Eye, GitBranch, HardDrive, Layers3, MonitorPlay, Pencil, Play, RefreshCw, RotateCcw, ServerCog, ShieldCheck, StopCircle, Trash2, UploadCloud } from 'lucide-react'
+import { Check, CloudDownload, Container, Eye, GitBranch, HardDrive, Layers3, MonitorPlay, Pencil, Play, RadioTower, RefreshCw, RotateCcw, ServerCog, ShieldCheck, StopCircle, Trash2, UploadCloud } from 'lucide-react'
 import { usePlatform } from '../api/PlatformContext'
 import { api } from '../api/client'
 import { loadAllPages } from '../api/pagination'
@@ -15,12 +15,15 @@ import {
   type InferenceAnalyticsConfig,
 } from '../components/InferenceBusinessFields'
 import { buildInferenceTaskMedia } from './inferenceTaskPayload'
-import type { Deployment, InferenceNode, InferenceTask, ModelRelease, NodeGroup } from '../types'
+import type { Deployment, InferenceNode, InferenceTask, MediaGateway, ModelRelease, NodeGroup } from '../types'
 
 type Tab = 'nodes' | 'releases' | 'tasks' | 'deployments'
 type Dialog = 'group' | 'release' | 'task' | 'deployment' | null
 interface PaginationState { total: number; page: number; pageSize: number; onPageChange: (page: number) => void; onPageSizeChange: (pageSize: number) => void }
 interface InferenceSummary { onlineNodes: number; totalNodes: number; publishedReleases: number; runningTasks: number; activeDeployments: number }
+
+const INFERENCE_STATUS_REFRESH_MS = 3_000
+const MEDIA_STREAM_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/
 
 function isHttpUrl(value: string): boolean {
   try {
@@ -112,6 +115,7 @@ export function InferencePage({ notify }: { notify: (message: string) => void })
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
   const [modelReleases, setModelReleases] = useState<ModelRelease[]>([])
+  const [mediaGateways, setMediaGateways] = useState<MediaGateway[]>([])
   const [nodeGroups, setNodeGroups] = useState<NodeGroup[]>([])
   const [inferenceNodes, setInferenceNodes] = useState<InferenceNode[]>([])
   const [inferenceTasks, setInferenceTasks] = useState<InferenceTask[]>([])
@@ -126,16 +130,18 @@ export function InferencePage({ notify }: { notify: (message: string) => void })
 
   const loadLookups = useCallback(async () => {
     try {
-      const [groups, releases, nodes, tasks] = await Promise.all([
+      const [groups, releases, nodes, tasks, gateways] = await Promise.all([
         api.nodeGroups(),
         loadAllPages(api.modelReleases),
         loadAllPages(api.inferenceNodes),
         loadAllPages(api.inferenceTasks),
+        api.mediaGateways(),
       ])
       setNodeGroups(groups)
       setModelReleases(releases)
       setInferenceNodes(nodes)
       setInferenceTasks(tasks)
+      setMediaGateways(gateways)
       setLookupError('')
     } catch (reason) {
       setLookupError(reason instanceof Error ? reason.message : '推理资源索引加载失败')
@@ -151,10 +157,10 @@ export function InferencePage({ notify }: { notify: (message: string) => void })
     }
   }, [])
 
-  const loadCurrentPage = useCallback(async () => {
+  const loadCurrentPage = useCallback(async (background = false) => {
     const requestId = pageRequestId.current + 1
     pageRequestId.current = requestId
-    setInferenceLoading(true)
+    if (!background) setInferenceLoading(true)
     try {
       const result = tab === 'nodes'
         ? await api.inferenceNodes(page, pageSize)
@@ -181,6 +187,8 @@ export function InferencePage({ notify }: { notify: (message: string) => void })
   const succeededConversions = useMemo(() => jobs.filter((job) => job.type === 'conversion' && job.status === 'succeeded'), [jobs])
   const publishedReleases = modelReleases.filter((item) => item.status === 'published')
   const activeNodes = inferenceNodes.filter((item) => item.lifecycle === 'active' && item.health === 'healthy')
+  const onlineMediaGateways = mediaGateways.filter((item) => item.enabled && item.status === 'online')
+  const selectedMediaGateway = mediaGateways.find((item) => item.id === taskZlmGatewayId)
   const deploymentTasks = inferenceTasks.filter((item) => item.status !== 'retired' && item.releaseId === deploymentReleaseId)
   const selectedTaskRelease = modelReleases.find((item) => item.id === taskReleaseId)
   const trackingSupported = selectedTaskRelease?.adapter.startsWith('yolo_') ?? false
@@ -191,10 +199,20 @@ export function InferencePage({ notify }: { notify: (message: string) => void })
     || taskRequestTimeout < taskConnectTimeout
     || taskRequestTimeout > 60000
   )
-  const taskMediaInvalid = (taskDecoder === 'rkmpp' && !taskInput.trim().startsWith('rtsp://'))
-    || (taskTracking && (!trackingSupported || taskTrackBuffer < 1 || taskTrackBuffer > 10000))
-    || (taskKafka && (!taskKafkaBrokers.trim() || !taskKafkaTopic.trim()))
-    || (taskZlmSei && (taskDecoder !== 'rkmpp' || !taskZlmGatewayId.trim() || !taskZlmStreamName.trim()))
+  const taskMediaError = taskDecoder === 'rkmpp' && !taskInput.trim().startsWith('rtsp://')
+    ? 'RKMPP 和 RTSP + SEI 仅支持 rtsp:// 输入源。'
+    : taskZlmSei && taskDecoder !== 'rkmpp'
+      ? 'RTSP + SEI 必须使用 RKMPP 硬解码。'
+    : taskTracking && (!trackingSupported || taskTrackBuffer < 1 || taskTrackBuffer > 10000)
+      ? '当前跟踪配置与模型或缓冲区范围不兼容。'
+      : taskKafka && (!taskKafkaBrokers.trim() || !taskKafkaTopic.trim())
+        ? '启用 Kafka 时必须填写 Broker 和 Topic。'
+        : taskZlmSei && (!selectedMediaGateway || !selectedMediaGateway.enabled || selectedMediaGateway.status !== 'online')
+          ? 'RTSP + SEI 需要选择一个在线媒体网关。'
+          : taskZlmSei && !MEDIA_STREAM_PATTERN.test(taskZlmStreamName.trim())
+            ? '流名称需为 1 到 64 位字母、数字、点、下划线或连字符，且以字母或数字开头。'
+            : ''
+  const taskMediaInvalid = Boolean(taskMediaError)
   const taskAnalyticsError = inferenceAnalyticsError(
     taskAnalytics,
     trackingSupported,
@@ -213,7 +231,18 @@ export function InferencePage({ notify }: { notify: (message: string) => void })
     if (page > lastPage) setPage(lastPage)
   }, [page, pageSize, total])
   useEffect(() => { void loadLookups() }, [loadLookups])
-  useEffect(() => { void loadCurrentPage() }, [loadCurrentPage])
+  useEffect(() => {
+    void loadCurrentPage()
+    const refreshVisiblePage = () => {
+      if (document.visibilityState === 'visible') void loadCurrentPage(true)
+    }
+    const timer = window.setInterval(refreshVisiblePage, INFERENCE_STATUS_REFRESH_MS)
+    document.addEventListener('visibilitychange', refreshVisiblePage)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', refreshVisiblePage)
+    }
+  }, [loadCurrentPage])
   useEffect(() => {
     void loadSummary()
     const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void loadSummary() }, 10_000)
@@ -244,7 +273,7 @@ export function InferencePage({ notify }: { notify: (message: string) => void })
     setTaskKafkaTopic('sei_msg')
     setTaskKafkaKey('')
     setTaskZlmSei(false)
-    setTaskZlmGatewayId('')
+    setTaskZlmGatewayId(onlineMediaGateways[0]?.id ?? '')
     setTaskZlmStreamName('')
     setTaskAnalytics(emptyInferenceAnalytics())
     setDialog('task')
@@ -334,9 +363,25 @@ export function InferencePage({ notify }: { notify: (message: string) => void })
           npuCoreMask: taskNpuCoreMask,
           npuCorePolicy: taskNpuCorePolicy,
         }
-        if (editingTaskId) await api.updateInferenceTask(editingTaskId, payload)
-        else await api.createInferenceTask(payload)
-        await reloadInference(); setDialog(null); notify(editingTaskId ? '推理任务已更新，请重新创建部署批次使配置生效' : '推理任务已创建，等待部署')
+        if (editingTaskId) {
+          await api.updateInferenceTask(editingTaskId, payload)
+          await reloadInference()
+          setDialog(null)
+          notify('推理任务已更新，请重新创建部署批次使配置生效')
+        } else {
+          const created = await api.createInferenceTask(payload)
+          try {
+            const started = await api.restartInferenceTask(created.id)
+            await reloadInference()
+            setDialog(null)
+            notify(`推理任务「${created.name}」正在启动，配置修订 ${started.configRevision} 已下发`)
+          } catch (reason) {
+            await reloadInference()
+            setDialog(null)
+            const message = reason instanceof Error ? reason.message : '启动失败'
+            notify(`推理任务已创建，但启动失败：${message}`)
+          }
+        }
         return
       }
       if (dialog === 'deployment') {
@@ -459,7 +504,94 @@ export function InferencePage({ notify }: { notify: (message: string) => void })
     </>}
     <Modal open={dialog === 'group'} title="管理节点组" description="节点组用于把同一模型按灰度或滚动策略下发到多块 RK3588。" onClose={close} footer={<><Button variant="secondary" onClick={close}>关闭</Button><Button onClick={() => void save()} disabled={saving || !groupName.trim()}>{saving ? '正在保存…' : editingGroupId ? '保存修改' : '新增节点组'}</Button></>}><div className="form-sections"><section className="form-section"><h3><Layers3 size={17} />节点组信息</h3><div className="form-grid two-columns"><label className="field"><span>组名称 <b>*</b></span><input value={groupName} onChange={(event) => setGroupName(event.target.value)} /></label><label className="field"><span>标签</span><input value={groupLabels} onChange={(event) => setGroupLabels(event.target.value)} placeholder="production, line-a" /><small>多个标签用英文逗号分隔。</small></label><label className="field full-span"><span>说明</span><input value={groupDescription} onChange={(event) => setGroupDescription(event.target.value)} /></label></div></section><section className="form-section"><h3><ServerCog size={17} />已有节点组</h3><div className="selection-list">{nodeGroups.length ? nodeGroups.map((group) => <div key={group.id} className="selection-row"><span><strong>{group.name}</strong><small>{group.description || group.labels.join(', ') || '未填写说明'}</small></span><div className="row-actions"><button className="icon-button ghost" title="编辑节点组" aria-label={`编辑节点组 ${group.name}`} onClick={() => editGroup(group)}><Pencil size={16} /></button><button className="icon-button ghost danger-action" title="删除节点组" aria-label={`删除节点组 ${group.name}`} onClick={() => void deleteGroup(group)}><Trash2 size={16} /></button></div></div>) : <EmptyState title="暂无节点组" message="填写上方信息后创建第一个节点组。" />}</div></section></div></Modal>
     <Modal open={dialog === 'release'} title="登记模型版本" description="只允许已完成并通过部署校验的转换任务进入模型资产库。" onClose={close} footer={<><Button variant="secondary" onClick={close}>取消</Button><Button onClick={() => void save()} disabled={saving || !releaseJobId}>{saving ? '正在登记…' : '登记版本'}</Button></>}><div className="form-sections"><section className="form-section"><h3><HardDrive size={17} />版本信息</h3><div className="form-grid two-columns"><label className="field"><span>版本名称 <b>*</b></span><input value={releaseName} onChange={(event) => setReleaseName(event.target.value)} /></label><label className="field"><span>版本号 <b>*</b></span><input value={releaseVersion} onChange={(event) => setReleaseVersion(event.target.value)} /></label><label className="field full-span"><span>来源转换任务 <b>*</b></span><select value={releaseJobId} onChange={(event) => setReleaseJobId(event.target.value)}><option value="">请选择已完成转换任务</option>{succeededConversions.map((job) => <option key={job.id} value={job.id}>{job.name} · {job.profileId}</option>)}</select></label></div></section></div></Modal>
-    <Modal open={dialog === 'task'} title={editingTaskId ? '编辑推理任务' : '新建推理任务'} description="任务绑定模型版本、目标板卡、NPU 核心和业务结果出口；修改后需重新创建部署批次使新配置下发。" onClose={close} footer={<><Button variant="secondary" onClick={close}>取消</Button><Button onClick={() => void save()} disabled={saving || !taskReleaseId || !taskNodeId || taskOutputInvalid || (taskNpuCorePolicy === 'exclusive' && taskNpuCoreMask === 'auto')}>{saving ? '正在保存…' : editingTaskId ? '保存并升级' : '创建任务'}</Button></>}><div className="form-sections"><section className="form-section"><h3><Container size={17} />任务配置</h3><div className="form-grid two-columns"><label className="field"><span>任务名称 <b>*</b></span><input value={taskName} onChange={(event) => setTaskName(event.target.value)} /></label><label className="field"><span>模型版本 <b>*</b></span><select value={taskReleaseId} onChange={(event) => setTaskReleaseId(event.target.value)}><option value="">请选择已发布版本</option>{publishedReleases.map((release) => <option key={release.id} value={release.id}>{release.name} · {release.version}</option>)}</select></label><label className="field"><span>目标板卡 <b>*</b></span><select value={taskNodeId} onChange={(event) => setTaskNodeId(event.target.value)}><option value="">请选择健康板卡</option>{activeNodes.map((node) => <option key={node.id} value={node.id}>{node.name}</option>)}</select></label><label className="field"><span>输入源 URI <b>*</b></span><input value={taskInput} onChange={(event) => setTaskInput(event.target.value)} placeholder="rtsp://... 或文件目录" /></label></div></section><section className="form-section"><h3><ServerCog size={17} />NPU 核心调度</h3><div className="form-grid two-columns"><label className="field"><span>使用核心</span><select value={taskNpuCoreMask} onChange={(event) => setTaskNpuCoreMask(event.target.value as InferenceTask['npuCoreMask'])}><option value="auto">自动调度（推荐）</option><option value="core0">核心 0</option><option value="core1">核心 1</option><option value="core2">核心 2</option><option value="core0_1">核心 0 + 1</option><option value="core0_1_2">全部核心</option></select></label><label className="field"><span>核心策略</span><select value={taskNpuCorePolicy} onChange={(event) => setTaskNpuCorePolicy(event.target.value as InferenceTask['npuCorePolicy'])}><option value="shared">共享（允许其他任务使用）</option><option value="exclusive">独占（禁止核心重叠）</option></select><small>{taskNpuCorePolicy === 'exclusive' ? '独占策略必须选择明确核心，平台会在部署前检查冲突。' : '共享策略适合默认自动调度和同模型多路视频复用。'}</small></label></div></section><section className="form-section"><h3><UploadCloud size={17} />结果出口</h3><div className="form-grid two-columns"><label className="field"><span>输出方式</span><select value={taskOutputType} onChange={(event) => setTaskOutputType(event.target.value as 'jsonl' | 'http')}><option value="jsonl">板端 JSONL 文件</option><option value="http">HTTP 业务接口</option></select></label>{taskOutputType === 'http' && <label className="field"><span>业务接口 URL <b>*</b></span><input value={taskOutputUrl} onChange={(event) => setTaskOutputUrl(event.target.value)} placeholder="https://service.example/results" /></label>}{taskOutputType === 'http' && <label className="field"><span>Bearer 令牌环境变量</span><input value={taskOutputAuthEnv} onChange={(event) => setTaskOutputAuthEnv(event.target.value)} placeholder="RKNODE_RESULT_SINK_TOKEN" /></label>}{taskOutputType === 'http' && <label className="field"><span>连接 / 请求超时（毫秒）</span><div className="inline-fields"><input type="number" min="100" max="60000" value={taskConnectTimeout} onChange={(event) => setTaskConnectTimeout(Number(event.target.value))} /><input type="number" min="100" max="60000" value={taskRequestTimeout} onChange={(event) => setTaskRequestTimeout(Number(event.target.value))} /></div><small>请求超时必须不小于连接超时，最大 60000 毫秒。</small></label>}</div></section></div></Modal>
+    <Modal
+      open={dialog === 'task'}
+      title={editingTaskId ? '编辑推理任务' : '新建推理任务'}
+      description="任务绑定模型版本、目标板卡、NPU 核心、媒体链路和业务结果出口；修改后需重新创建部署批次使新配置下发。"
+      onClose={close}
+      footer={<>
+        <Button variant="secondary" onClick={close}>取消</Button>
+        <Button
+          onClick={() => void save()}
+          disabled={saving || !taskName.trim() || !taskReleaseId || !taskNodeId || !taskInput.trim() || taskOutputInvalid || taskMediaInvalid || (taskNpuCorePolicy === 'exclusive' && taskNpuCoreMask === 'auto')}
+        >
+          {saving ? '正在保存…' : editingTaskId ? '保存并升级' : '创建任务'}
+        </Button>
+      </>}
+    >
+      <div className="form-sections">
+        <section className="form-section">
+          <h3><Container size={17} />任务配置</h3>
+          <div className="form-grid two-columns">
+            <label className="field"><span>任务名称 <b>*</b></span><input value={taskName} onChange={(event) => setTaskName(event.target.value)} /></label>
+            <label className="field"><span>模型版本 <b>*</b></span><select value={taskReleaseId} onChange={(event) => setTaskReleaseId(event.target.value)}><option value="">请选择已发布版本</option>{publishedReleases.map((release) => <option key={release.id} value={release.id}>{release.name} · {release.version}</option>)}</select></label>
+            <label className="field"><span>目标板卡 <b>*</b></span><select value={taskNodeId} onChange={(event) => setTaskNodeId(event.target.value)}><option value="">请选择健康板卡</option>{activeNodes.map((node) => <option key={node.id} value={node.id}>{node.name}</option>)}</select></label>
+            <label className="field"><span>输入源 URI <b>*</b></span><input value={taskInput} onChange={(event) => setTaskInput(event.target.value)} placeholder="rtsp://... 或文件目录" /></label>
+          </div>
+        </section>
+        <section className="form-section">
+          <h3><RadioTower size={17} />媒体链路</h3>
+          <div className="form-grid two-columns">
+            <label className="field">
+              <span>解码方式</span>
+              <select value={taskDecoder} disabled={taskZlmSei} onChange={(event) => setTaskDecoder(event.target.value as 'opencv' | 'rkmpp')}>
+                <option value="opencv">OpenCV 通用解码</option>
+                <option value="rkmpp">RKMPP 硬解码</option>
+              </select>
+              <small>{taskZlmSei ? 'RTSP + SEI 已自动锁定 RKMPP，以保留原始编码流。' : 'RKMPP 仅支持 RTSP H.264/H.265 输入。'}</small>
+            </label>
+            <label className="toggle-card">
+              <input
+                type="checkbox"
+                checked={taskZlmSei}
+                disabled={!taskZlmSei && onlineMediaGateways.length === 0}
+                onChange={(event) => {
+                  const enabled = event.target.checked
+                  setTaskZlmSei(enabled)
+                  if (enabled) {
+                    setTaskDecoder('rkmpp')
+                    setTaskZlmGatewayId((current) => current || onlineMediaGateways[0]?.id || '')
+                  }
+                }}
+              />
+              <span><strong>RTSP + SEI 实时预览</strong><small>转发原始码流，由播放端解析 SEI 并绘制结果。</small></span>
+            </label>
+            {taskZlmSei && <>
+              <label className="field">
+                <span>媒体网关 <b>*</b></span>
+                <select value={taskZlmGatewayId} onChange={(event) => setTaskZlmGatewayId(event.target.value)}>
+                  <option value="">请选择在线媒体网关</option>
+                  {mediaGateways.map((gateway) => <option key={gateway.id} value={gateway.id} disabled={!gateway.enabled || gateway.status !== 'online'}>{gateway.name} · {gateway.status === 'online' ? '在线' : '不可用'}</option>)}
+                </select>
+              </label>
+              <label className="field">
+                <span>发布流名称 <b>*</b></span>
+                <input maxLength={64} value={taskZlmStreamName} onChange={(event) => setTaskZlmStreamName(event.target.value)} placeholder="line-a-camera-01" />
+                <small>同一媒体网关内必须唯一。</small>
+              </label>
+            </>}
+          </div>
+          {!onlineMediaGateways.length && !taskZlmSei && <div className="field-hint">当前没有在线媒体网关，请先在系统设置中完成媒体网关连接。</div>}
+          {taskMediaError && <div className="api-banner danger" role="alert">{taskMediaError}</div>}
+        </section>
+        <section className="form-section">
+          <h3><ServerCog size={17} />NPU 核心调度</h3>
+          <div className="form-grid two-columns">
+            <label className="field"><span>使用核心</span><select value={taskNpuCoreMask} onChange={(event) => setTaskNpuCoreMask(event.target.value as InferenceTask['npuCoreMask'])}><option value="auto">自动调度（推荐）</option><option value="core0">核心 0</option><option value="core1">核心 1</option><option value="core2">核心 2</option><option value="core0_1">核心 0 + 1</option><option value="core0_1_2">全部核心</option></select></label>
+            <label className="field"><span>核心策略</span><select value={taskNpuCorePolicy} onChange={(event) => setTaskNpuCorePolicy(event.target.value as InferenceTask['npuCorePolicy'])}><option value="shared">共享（允许其他任务使用）</option><option value="exclusive">独占（禁止核心重叠）</option></select><small>{taskNpuCorePolicy === 'exclusive' ? '独占策略必须选择明确核心，平台会在部署前检查冲突。' : '共享策略适合默认自动调度和同模型多路视频复用。'}</small></label>
+          </div>
+        </section>
+        <section className="form-section">
+          <h3><UploadCloud size={17} />结果出口</h3>
+          <div className="form-grid two-columns">
+            <label className="field"><span>输出方式</span><select value={taskOutputType} onChange={(event) => setTaskOutputType(event.target.value as 'jsonl' | 'http')}><option value="jsonl">板端 JSONL 文件</option><option value="http">HTTP 业务接口</option></select></label>
+            {taskOutputType === 'http' && <label className="field"><span>业务接口 URL <b>*</b></span><input value={taskOutputUrl} onChange={(event) => setTaskOutputUrl(event.target.value)} placeholder="https://service.example/results" /></label>}
+            {taskOutputType === 'http' && <label className="field"><span>Bearer 令牌环境变量</span><input value={taskOutputAuthEnv} onChange={(event) => setTaskOutputAuthEnv(event.target.value)} placeholder="RKNODE_RESULT_SINK_TOKEN" /></label>}
+            {taskOutputType === 'http' && <label className="field"><span>连接 / 请求超时（毫秒）</span><div className="inline-fields"><input type="number" min="100" max="60000" value={taskConnectTimeout} onChange={(event) => setTaskConnectTimeout(Number(event.target.value))} /><input type="number" min="100" max="60000" value={taskRequestTimeout} onChange={(event) => setTaskRequestTimeout(Number(event.target.value))} /></div><small>请求超时必须不小于连接超时，最大 60000 毫秒。</small></label>}
+          </div>
+        </section>
+      </div>
+    </Modal>
     <Modal open={dialog === 'deployment'} title="创建部署批次" description="平台按策略推进目标板卡，板端代理逐阶段回报下载、校验、排空、热身和健康状态。" onClose={close} footer={<><Button variant="secondary" onClick={close}>取消</Button><Button onClick={() => void save()} disabled={saving || !deploymentReleaseId || !selectedTaskIds.length}>{saving ? '正在创建…' : '开始部署'}</Button></>}><div className="form-sections"><section className="form-section"><h3><CloudDownload size={17} />发布策略</h3><div className="form-grid two-columns"><label className="field"><span>批次名称 <b>*</b></span><input value={deploymentName} onChange={(event) => setDeploymentName(event.target.value)} /></label><label className="field"><span>模型版本 <b>*</b></span><select value={deploymentReleaseId} onChange={(event) => { const value = event.target.value; setDeploymentReleaseId(value); setSelectedTaskIds(inferenceTasks.filter((item) => item.releaseId === value && item.status === 'stopped').map((item) => item.id)) }}><option value="">请选择已发布版本</option>{publishedReleases.map((release) => <option key={release.id} value={release.id}>{release.name} · {release.version}</option>)}</select></label><label className="field"><span>推进策略</span><select value={deploymentStrategy} onChange={(event) => setDeploymentStrategy(event.target.value as typeof deploymentStrategy)}><option value="canary">先一台金丝雀</option><option value="rolling">滚动批次</option><option value="all_at_once">全部同时</option></select></label></div></section><section className="form-section"><h3><GitBranch size={17} />选择推理任务</h3><div className="selection-list">{deploymentTasks.length ? deploymentTasks.map((task) => <label key={task.id} className="selection-row"><input type="checkbox" checked={selectedTaskIds.includes(task.id)} onChange={(event) => setSelectedTaskIds(event.target.checked ? [...selectedTaskIds, task.id] : selectedTaskIds.filter((id) => id !== task.id))} /><span><strong>{task.name}</strong><small>{task.inputUri}</small></span><StatusBadge tone={tone(task.status)}>{taskLabels[task.status]}</StatusBadge></label>) : <EmptyState title="暂无可部署任务" message="先为该模型版本创建已停止的推理任务。" />}</div></section></div></Modal>
     {detailDeployment && <DeploymentDetailModal deployment={detailDeployment} nodes={inferenceNodes} tasks={inferenceTasks} onClose={() => setDetailDeployment(null)} />}
     {previewTask && <Modal open title={`实时预览 · ${previewTask.name}`} description="播放原始 RTSP 转发流，并在浏览器端解析 SEI 结果叠加。" width="large" onClose={() => setPreviewTask(null)}><InferenceStreamPlayer task={previewTask} /></Modal>}
@@ -478,7 +610,32 @@ function ReleasesTable({ releases, jobs, pagination, onPublish, onDeprecate, onD
 }
 
 function TasksTable({ tasks, releases, nodes, pagination, busyTaskId, onPreview, onStop, onRestart, onEdit, onRetire }: { tasks: InferenceTask[]; releases: ModelRelease[]; nodes: InferenceNode[]; pagination: PaginationState; busyTaskId: string; onPreview: (task: InferenceTask) => void; onStop: (task: InferenceTask) => void; onRestart: (task: InferenceTask) => void; onEdit: (task: InferenceTask) => void; onRetire: (task: InferenceTask) => void }) {
-  return <section className="panel table-panel"><div className="table-meta"><span>共 <strong>{pagination.total}</strong> 个推理任务</span><span>当前页 {tasks.length} 个</span></div>{tasks.length ? <><div className="table-scroll"><table className="data-table inference-table"><thead><tr><th>任务</th><th>模型版本</th><th>目标板卡</th><th>NPU 核心</th><th>输入源</th><th>状态</th><th>配置版本</th><th aria-label="操作" /></tr></thead><tbody>{tasks.map((task) => <tr key={task.id}><td><strong>{task.name}</strong></td><td>{releases.find((item) => item.id === task.releaseId)?.name ?? '模型版本不可用'}</td><td>{nodes.find((item) => item.id === task.nodeId)?.name ?? '板卡不可用'}</td><td><span className="type-label">{npuCoreLabels[task.npuCoreMask]}<small>{task.npuCorePolicy === 'exclusive' ? '独占' : '共享'}</small></span></td><td><code className="service-endpoint">{task.inputUri}</code></td><td><StatusBadge tone={tone(task.status)}>{taskLabels[task.status]}</StatusBadge></td><td><strong>{task.configRevision}</strong></td><td><div className="row-actions">{['running', 'deploying', 'degraded'].includes(task.status) && <button className="icon-button ghost" title="查看实时预览" aria-label={`查看实时预览 ${task.name}`} onClick={() => onPreview(task)}><MonitorPlay size={16} /></button>}{['stopped', 'failed', 'draft'].includes(task.status) && <button className="icon-button ghost" title="编辑或升级推理任务" aria-label={`编辑推理任务 ${task.name}`} onClick={() => onEdit(task)}><Pencil size={16} /></button>}{['stopped', 'failed'].includes(task.status) && <Button variant="secondary" disabled={Boolean(busyTaskId)} onClick={() => onRestart(task)} icon={<Play size={15} />}>{busyTaskId === task.id ? '重启中…' : '重启'}</Button>}{['running', 'deploying', 'degraded'].includes(task.status) && <Button variant="quiet" disabled={Boolean(busyTaskId)} onClick={() => onStop(task)} icon={<StopCircle size={15} />}>{busyTaskId === task.id ? '停止中…' : '停止'}</Button>}{['stopped', 'failed'].includes(task.status) && <button className="icon-button ghost danger-action" title="退役推理任务" aria-label={`退役推理任务 ${task.name}`} disabled={Boolean(busyTaskId)} onClick={() => onRetire(task)}><Trash2 size={16} /></button>}</div></td></tr>)}</tbody></table></div><TablePagination {...pagination} /></> : <EmptyState title="暂无推理任务" message="创建任务后选择一个已发布模型版本和健康板卡。" />}</section>
+  return <section className="panel table-panel">
+    <div className="table-meta"><span>共 <strong>{pagination.total}</strong> 个推理任务</span><span>当前页 {tasks.length} 个</span></div>
+    {tasks.length ? <>
+      <div className="table-scroll">
+        <table className="data-table inference-table">
+          <thead><tr><th>任务</th><th>模型版本</th><th>目标板卡</th><th>NPU 核心</th><th>输入源</th><th>状态</th><th aria-label="操作" /></tr></thead>
+          <tbody>{tasks.map((task) => <tr key={task.id}>
+            <td><strong>{task.name}</strong></td>
+            <td>{releases.find((item) => item.id === task.releaseId)?.name ?? '模型版本不可用'}</td>
+            <td>{nodes.find((item) => item.id === task.nodeId)?.name ?? '板卡不可用'}</td>
+            <td><span className="type-label">{npuCoreLabels[task.npuCoreMask]}<small>{task.npuCorePolicy === 'exclusive' ? '独占' : '共享'}</small></span></td>
+            <td><code className="service-endpoint">{task.inputUri}</code></td>
+            <td><StatusBadge tone={tone(task.status)}>{taskLabels[task.status]}</StatusBadge></td>
+            <td><div className="row-actions">
+              {['running', 'deploying', 'degraded'].includes(task.status) && <button className="icon-button ghost" title="查看实时预览" aria-label={`查看实时预览 ${task.name}`} onClick={() => onPreview(task)}><MonitorPlay size={16} /></button>}
+              {['stopped', 'failed', 'draft'].includes(task.status) && <button className="icon-button ghost" title="编辑或升级推理任务" aria-label={`编辑推理任务 ${task.name}`} onClick={() => onEdit(task)}><Pencil size={16} /></button>}
+              {['stopped', 'failed'].includes(task.status) && <Button variant="secondary" disabled={Boolean(busyTaskId)} onClick={() => onRestart(task)} icon={<Play size={15} />}>{busyTaskId === task.id ? '重启中…' : '重启'}</Button>}
+              {['running', 'deploying', 'degraded'].includes(task.status) && <Button variant="quiet" disabled={Boolean(busyTaskId)} onClick={() => onStop(task)} icon={<StopCircle size={15} />}>{busyTaskId === task.id ? '停止中…' : '停止'}</Button>}
+              {['stopped', 'failed'].includes(task.status) && <button className="icon-button ghost danger-action" title="退役推理任务" aria-label={`退役推理任务 ${task.name}`} disabled={Boolean(busyTaskId)} onClick={() => onRetire(task)}><Trash2 size={16} /></button>}
+            </div></td>
+          </tr>)}</tbody>
+        </table>
+      </div>
+      <TablePagination {...pagination} />
+    </> : <EmptyState title="暂无推理任务" message="创建任务后选择一个已发布模型版本和健康板卡。" />}
+  </section>
 }
 
 function DeploymentsTable({ deployments, releases, nodes, pagination, onRetry, onRollback, onDetail, onDelete }: { deployments: Deployment[]; releases: ModelRelease[]; nodes: InferenceNode[]; pagination: PaginationState; onRetry: (deployment: Deployment) => void; onRollback: (deployment: Deployment) => void; onDetail: (deployment: Deployment) => void; onDelete: (deployment: Deployment) => void }) {

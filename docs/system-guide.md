@@ -115,12 +115,61 @@ docker compose -f deploy/nodes/trainer/compose.yaml logs -f --tail=200 trainer
 docker compose -p rknode-rk3588 -f deploy/nodes/rk3588/compose.yaml logs -f --tail=200 converter inference
 ~~~
 
-端口只开放给内网或 VPN，服务不得暴露到公网。无证书部署使用受控 IP:端口；有条件时使用 HTTPS 反向代理。SSH 隧道仅作为临时故障排查手段，隧道示例地址为 172.29.0.1:11081 和 172.29.0.1:11082，跳板机应使用密钥、BatchMode=yes 和自动过期，不得保存 SSH 密码。
+端口只开放给内网或 VPN，服务不得暴露到公网。无证书部署使用受控 IP:端口；有条件时使用 HTTPS 反向代理。当前现网通过中央主机 SSH 隧道 `172.29.0.1:11081` 和 `172.29.0.1:11082` 探活；直连端口恢复后应切换 Endpoint。隧道只作为应急连接方式维护，跳板机应使用密钥、BatchMode=yes 和自动过期，不得保存 SSH 密码。
+
+## 7. 推理媒体算子和动态链路
+
+推理容器当前注册 10 类可选算子：
+
+| 类别 | 算子 | 作用 |
+| --- | --- | --- |
+| 输入 | `VideoCaptureNode` | OpenCV 兼容输入 |
+| 输入 | `RkMppCaptureNode` | RTSP H.264/H.265 的 Rockchip MPP 硬解码，并保留原始编码包 |
+| 推理 | `InferNode` | 主 RKNN 模型推理 |
+| 跟踪 | `ByteTrackNode` | YOLO 检测结果跟踪 |
+| 推理 | `SecondaryInferNode` | 对主检测结果指定类别执行二级 YOLO 推理 |
+| 分析 | `AnalyticsNode` | 区域进入/离开和越线规则 |
+| 事件 | `EventOutputNode` | JPEG 抓拍和原码流录像 |
+| 输出 | `JsonOutputNode` | JSONL 或 HTTP 结构化结果 |
+| 输出 | `KafkaOutputNode` | 异步 Kafka 结果输出 |
+| 输出 | `ZlmSeiOutputNode` | 将 schema-v2 结果写入原始 RTSP 码流的 SEI |
+
+这些是镜像支持的算子，不代表每个任务都会实例化全部节点。每次任务创建、编辑或重启时，平台根据 `media` 和 `analytics` 生成不可变 revision。典型动态链路为：
+
+~~~text
+Capture -> Infer -> [ByteTrack] -> [SecondaryInfer 0..N]
+                                  -> [Analytics]
+                                  -> [EventOutput]
+                                  -> JsonOutput
+                                  -> [KafkaOutput]
+                                  -> [ZlmSeiOutput]
+~~~
+
+方括号表示按任务配置启用的分支，JSON、Kafka 和 ZLM SEI 是独立输出，不是互相串联的必经节点。
+
+配置约束：
+
+- `decoder=rkmpp` 只接受 RTSP 输入；ZLM SEI 和事件录像必须使用 RKMPP。
+- ByteTrack 只适用于 YOLO 检测模型；区域/越线规则必须同时启用 ByteTrack。
+- 二级推理只能引用已发布的 YOLO 检测版本，最多四个独立版本。
+- `AnalyticsNode` 同时处理区域和越线；`EventOutputNode` 同时处理抓拍和录像。
+- Kafka/ZLM sink 失败不会改变本地推理任务健康状态，失败分支会重试或丢弃，不阻塞 NPU 主链。
+- 空 `media` 和 `analytics` 保留旧版 OpenCV + JSON 兼容链路。
+
+检查当前任务实际链路时，以板端 `/data/runtime/revisions/<revision>/pipelines/` 中的任务图为准，而不是只看节点能力列表。节点健康检查和版本核对：
+
+~~~bash
+curl -fsS -H "Authorization: Bearer <node-token>" http://<node-host>:10082/health
+docker compose -p rknode-rk3588 -f compose.yaml ps
+docker compose -p rknode-rk3588 -f compose.yaml logs --tail=200 inference
+~~~
+
+当前在线发布线为 API/Web `2026.08.25`、Media `2026.08.24`、RK3588 转换/推理 `2026.08.25-business`；训练角色仍为 `2026.08.24`。离线包尚未切换到这条在线发布线，使用前必须核对包内 `VERSION` 与镜像清单。
 
 ## 旧版静态 Token 迁移
 
 旧节点仍使用静态 Token 时，在平台为同一 Endpoint 重新生成一次性注册码，写入对应 secret 文件并使用 compose.enrollment.yaml 启动。确认 enrolled 后停止 overlay，清空 Compose 中旧 Token 字段并重建服务。旧 Token 不得写入日志、镜像、Git 或公网主机。
 
-## 7. 备份和升级
+## 8. 备份和升级
 
 备份 Compose YAML、平台数据卷、节点数据卷和权限为 0600 的 secret 文件。升级时先执行 docker compose ... config --quiet，再使用 up -d --no-build --force-recreate；不要删除持久化卷。升级后检查平台 ready、节点 enrolled + online、Media RTSP/WS-FLV 和推理设备挂载。

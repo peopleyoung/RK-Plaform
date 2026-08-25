@@ -1334,6 +1334,7 @@ class AgentTaskDescriptor(ApiModel):
     analytics: dict[str, Any]
     npu_core_mask: NpuCoreMask
     npu_core_policy: NpuCorePolicy
+    config_revision: int = Field(default=0, ge=0)
     context_count: int = 1
     worker_count: int = 1
 

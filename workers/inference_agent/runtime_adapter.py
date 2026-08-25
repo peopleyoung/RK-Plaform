@@ -633,6 +633,14 @@ def _canonical_thresholds(task: dict[str, Any]) -> str:
     return json.dumps(thresholds, sort_keys=True, separators=(",", ":"))
 
 
+def _task_revision(task: dict[str, Any], node_revision: int) -> int:
+    """Use the task revision for result envelopes, with legacy fallback."""
+    value = task.get("configRevision", task.get("config_revision"))
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return node_revision
+
+
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
@@ -704,6 +712,7 @@ def prepare_revision(
                 instance_names.append(instance_name)
                 for task in group_tasks:
                     task_id = str(task["id"])
+                    task_revision = _task_revision(task, revision)
                     task_slug = _safe_name(task_id, "task")[:60]
                     pipeline_name = _safe_name(
                         f"{task_slug}-{hashlib.sha256(task_id.encode()).hexdigest()[:8]}",
@@ -816,7 +825,7 @@ def prepare_revision(
                         "node": "JsonOutputNode",
                         "instance": instance_name,
                         "task_id": task_id,
-                        "revision": revision,
+                        "revision": task_revision,
                         "output": sink,
                         "link_to": [result_upstream],
                     }
@@ -826,7 +835,7 @@ def prepare_revision(
                             "input": str(task["inputUri"]),
                             "instance": instance_name,
                             "task_id": task_id,
-                            "revision": revision,
+                            "revision": task_revision,
                             "brokers": media["kafka"]["brokers"],
                             "topic": media["kafka"]["topic"],
                             "queue_messages": media["kafka"]["queue_messages"],
@@ -842,7 +851,7 @@ def prepare_revision(
                             "output": media["zlm_sei"]["output"],
                             "instance": instance_name,
                             "task_id": task_id,
-                            "revision": revision,
+                            "revision": task_revision,
                             "reconnect_ms": media["zlm_sei"]["reconnect_ms"],
                             "link_to": [result_upstream],
                         }

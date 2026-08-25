@@ -283,6 +283,7 @@ def test_release_node_task_deployment_and_agent_artifact_access(client: TestClie
     assert desired.json()["releases"][0]["manifest"]["labels"] == ["background", "scratch"]
     assert desired.json()["tasks"][0]["npuCoreMask"] == "core1"
     assert desired.json()["tasks"][0]["npuCorePolicy"] == "exclusive"
+    assert desired.json()["tasks"][0]["configRevision"] == target["desiredRevision"]
 
     states = ["downloading", "verifying", "staged", "draining", "activating", "warming", "healthy"]
     for state in states:

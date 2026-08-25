@@ -303,7 +303,7 @@ def test_rk3588_delivery_uses_one_image_for_two_container_roles() -> None:
     assert 'io.rknode.face-capabilities="none"' in dockerfile
     assert 'CMD ["python3", "-m", "workers.node_service.main"]' in dockerfile
     assert compose.count("deploy/rk3588/Dockerfile.node") == 1
-    assert compose.count("rknode-rk3588-node:2026.08.24-business") == 2
+    assert compose.count("rknode-rk3588-node:2026.08.25-business") == 2
     assert 'RKNODE_NODE_KIND: converter' in compose
     assert 'RKNODE_NODE_KIND: inference' in compose
     assert 'rknode-rk3588-node:${version}' in build_script

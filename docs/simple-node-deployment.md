@@ -27,7 +27,9 @@ docker compose -f deploy/compose.yaml up -d --no-build
 | RKNODE_NODE_TOKEN_FILE | 已注册后保存节点 Token 的容器路径 |
 | RKNODE_ENROLLMENT_TOKEN_FILE | 首次注册时的 Compose secret 路径 |
 
-服务地址不是 RKNODE_PLATFORM_URL：平台登记训练地址为 172.16.66.249:10081，板端转换为 172.30.82.12:10081，板端推理为 172.30.82.12:10082。历史隧道 172.29.0.1:11081、172.29.0.1:11082 只用于临时验证。
+服务地址不是 RKNODE_PLATFORM_URL：平台登记训练地址为 172.16.66.249:10081，板端直连地址为 172.30.82.12:10081/10082。当前运行环境仍通过中央主机上的 SSH 隧道 `172.29.0.1:11081`（转换）和 `172.29.0.1:11082`（推理）探活；这是现网连接方式，隧道断开时节点会离线。直连端口恢复后，应将平台 Endpoint 切换到板端直连地址。
+
+当前在线镜像矩阵为：API/Web `2026.08.25`、Media `2026.08.24`、RK3588 转换/推理 `2026.08.25-business`、Torch CPU 训练 `2026.08.24`。离线包仍按包内 `deploy/offline/VERSION` 和 `manifest.json` 管理，不要把在线标签直接填入旧离线包。
 
 ## 3. Torch/Paddle 训练节点
 
@@ -88,6 +90,8 @@ docker compose -p rknode-rk3588 -f compose.yaml ps
 curl -fsS http://172.30.82.12:10081/health
 curl -fsS http://172.30.82.12:10082/health
 ~~~
+
+推理镜像支持 MPP 硬解码、主 RKNN、ByteTrack、二级 YOLO、区域/越线分析、事件抓拍/录像、JSONL/HTTP、Kafka 和 ZLM SEI。任务创建时按 `media` 和 `analytics` 选择分支；不会固定串联全部算子。ZLM SEI 和事件录像要求 RTSP + `decoder=rkmpp`，区域/越线要求 YOLO + ByteTrack，Kafka 与 ZLM 是独立输出分支。详细节点契约见 [runtime-adapter README](../deploy/rk3588/runtime-adapter/README.md)。
 
 ## 5. 故障排查
 

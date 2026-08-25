@@ -105,6 +105,14 @@ active.
 
 ## RK3588 media graph
 
+The image registers ten node types: `VideoCaptureNode`, `RkMppCaptureNode`,
+`InferNode`, `ByteTrackNode`, `SecondaryInferNode`, `AnalyticsNode`,
+`EventOutputNode`, `JsonOutputNode`, `KafkaOutputNode`, and
+`ZlmSeiOutputNode`. A task instantiates only the nodes required by its
+`media` and `analytics` fields. `AnalyticsNode` handles both area and line
+rules; `EventOutputNode` handles both snapshots and recordings. JSON, Kafka,
+and ZLM SEI are independent output branches.
+
 The optional task `media` object is converted into independent graph branches:
 
 ```json
@@ -165,9 +173,9 @@ or registry access:
 docker build --platform linux/arm64 \
   -f deploy/rk3588/Dockerfile.node.rebuild \
   --build-arg RKNODE_BASE_IMAGE=rknode-rk3588-node:2026.08.24-business \
-  --build-arg RKNODE_RELEASE_VERSION=2026.08.24-business \
+  --build-arg RKNODE_RELEASE_VERSION=2026.08.25-business \
   --build-arg RKNODE_BUILD_JOBS=2 \
-  -t rknode-rk3588-node:2026.08.24-business .
+  -t rknode-rk3588-node:2026.08.25-business .
 ```
 
 The rebuild file removes the old source/application trees before copying the

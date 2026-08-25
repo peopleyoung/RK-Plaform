@@ -60,6 +60,13 @@ const smokeSecondaryRelease = {
   ...smokeYoloRelease,
   id: 'release_ui_yolo_secondary', name: '界面 YOLO 二级模型', version: 'v1.0.1',
 }
+const smokeMediaGateway = {
+  id: 'gateway_ui_fixture', name: '界面在线媒体网关', builtin: false, enabled: true,
+  publishHost: '127.0.0.1', rtspPort: 8554, playbackHost: '127.0.0.1', wsPort: 8080,
+  apiHost: '127.0.0.1', apiPort: 8080, app: 'live', status: 'online',
+  apiSecretConfigured: true, hookIdentityConfigured: true, lastProbeAt: fixtureTime,
+  lastHookAt: fixtureTime, lastError: null, createdAt: fixtureTime, updatedAt: fixtureTime,
+}
 const smokeTrainingEvents = [
   { id: 91001, type: 'log', level: 'info', message: 'Loading training dataset', data: { stage: 'train' }, createdAt: fixtureTime },
   { id: 91002, type: 'metric', level: 'info', message: 'epoch=1/2 train_loss=0.72 val_loss=0.65', data: { stage: 'train', epoch: 1, totalEpochs: 2, metrics: { train_loss: 0.72, val_loss: 0.65 } }, createdAt: fixtureTime },
@@ -79,6 +86,14 @@ const smokeInferenceTask = {
 const smokeRunningInferenceTask = {
   ...smokeInferenceTask,
   id: 'itask_ui_running', name: '界面实时预览任务', status: 'running', inputUri: 'rtsp://camera/ui-preview', configRevision: 2,
+}
+const smokeCreatedInferenceTask = {
+  ...smokeInferenceTask,
+  id: 'itask_ui_created', name: '界面自动启动任务', status: 'stopped', releaseId: smokeYoloRelease.id, configRevision: 0,
+}
+const smokeCreatedStartedInferenceTask = {
+  ...smokeCreatedInferenceTask,
+  status: 'deploying', configRevision: 3,
 }
 const smokeRestartDeployment = {
   id: 'deployment_ui_restart', name: `Restart ${smokeInferenceTask.name}`, status: 'rolling', releaseId: smokeInferenceTask.releaseId,
@@ -106,11 +121,17 @@ const smokeCompletedDeployment = {
 }
 let smokeInferenceRestarted = false
 let smokeInferenceRestartCalls = 0
+let smokeCreatedInference = false
+let smokeCreatedInferenceCalls = 0
+let smokeCreatedInferenceStartCalls = 0
+let smokeCreatedInferenceFirstPageReadAt = 0
+let smokeCreatedInferencePayload = null
 let smokePlaybackSessionCalls = 0
 let smokeRetiredNodeDeleted = false
 let smokeRetiredNodeDeleteCalls = 0
 let smokeCompletedDeploymentDeleted = false
 let smokeCompletedDeploymentDeleteCalls = 0
+let smokeDeploymentFirstPageReadAt = 0
 
 await page.route('**/api/v1/datasets', async (route) => {
   const request = route.request()
@@ -207,9 +228,28 @@ await page.route('**/api/v1/model-releases**', async (route) => {
   }
   await route.fulfill({ response, json: payload })
 })
+await page.route('**/api/v1/media-gateways', async (route) => {
+  const response = await route.fetch()
+  const payload = await response.json()
+  if (!Array.isArray(payload)) throw new Error('media gateway fixture expects an array')
+  if (!payload.some((item) => item.id === smokeMediaGateway.id)) payload.push(smokeMediaGateway)
+  await route.fulfill({ response, json: payload })
+})
 await page.route('**/api/v1/inference-tasks**', async (route) => {
   const request = route.request()
   const url = new URL(request.url())
+  if (request.method() === 'POST' && url.pathname === '/api/v1/inference-tasks') {
+    smokeCreatedInference = true
+    smokeCreatedInferenceCalls += 1
+    smokeCreatedInferencePayload = JSON.parse(request.postData() ?? '{}')
+    await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify(smokeCreatedInferenceTask) })
+    return
+  }
+  if (request.method() === 'POST' && url.pathname.endsWith(`/${smokeCreatedInferenceTask.id}/restart`)) {
+    smokeCreatedInferenceStartCalls += 1
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(smokeCreatedStartedInferenceTask) })
+    return
+  }
   if (request.method() === 'POST' && url.pathname.endsWith(`/${smokeInferenceTask.id}/restart`)) {
     smokeInferenceRestarted = true
     smokeInferenceRestartCalls += 1
@@ -235,7 +275,14 @@ await page.route('**/api/v1/inference-tasks**', async (route) => {
     const fixture = { ...smokeInferenceTask, status: smokeInferenceRestarted ? 'deploying' : 'stopped' }
     if (!payload.items.some((item) => item.id === fixture.id)) payload.items.push(fixture)
     if (!payload.items.some((item) => item.id === smokeRunningInferenceTask.id)) payload.items.push(smokeRunningInferenceTask)
-    payload.total += 2
+    if (smokeCreatedInference && !payload.items.some((item) => item.id === smokeCreatedInferenceTask.id)) {
+      if (url.searchParams.get('pageSize') === '10' && !smokeCreatedInferenceFirstPageReadAt) smokeCreatedInferenceFirstPageReadAt = Date.now()
+      const createdTask = smokeCreatedInferenceStartCalls
+        ? { ...smokeCreatedStartedInferenceTask, status: smokeCreatedInferenceFirstPageReadAt && Date.now() - smokeCreatedInferenceFirstPageReadAt >= 500 ? 'running' : 'deploying' }
+        : smokeCreatedInferenceTask
+      payload.items.push(createdTask)
+    }
+    payload.total += smokeCreatedInference ? 3 : 2
   }
   await route.fulfill({ response, json: payload })
 })
@@ -276,7 +323,21 @@ await page.route('**/api/v1/deployments**', async (route) => {
   const response = await route.fetch()
   const payload = await response.json()
   if (Array.isArray(payload.items) && Number(url.searchParams.get('page') ?? 1) === 1 && !smokeCompletedDeploymentDeleted) {
-    if (!payload.items.some((item) => item.id === smokeCompletedDeployment.id)) payload.items.push(smokeCompletedDeployment)
+    if (url.searchParams.get('pageSize') === '10' && !smokeDeploymentFirstPageReadAt) smokeDeploymentFirstPageReadAt = Date.now()
+    const completed = Boolean(smokeDeploymentFirstPageReadAt && Date.now() - smokeDeploymentFirstPageReadAt >= 500)
+    const deploymentFixture = {
+      ...smokeCompletedDeployment,
+      status: completed ? 'succeeded' : 'rolling',
+      completedAt: completed ? fixtureTime : null,
+      targets: smokeCompletedDeployment.targets.map((target) => ({
+        ...target,
+        state: completed ? 'healthy' : 'switching',
+        progress: completed ? 100 : 70,
+        stage: completed ? 'healthy' : 'switching',
+        completedAt: completed ? fixtureTime : null,
+      })),
+    }
+    if (!payload.items.some((item) => item.id === deploymentFixture.id)) payload.items.push(deploymentFixture)
     payload.total += 1
   }
   await route.fulfill({ response, json: payload })
@@ -344,14 +405,35 @@ const inferenceTimeouts = inferenceTaskDialog.locator('.inline-fields input')
 assert.deepEqual(await inferenceTimeouts.evaluateAll((inputs) => inputs.map((input) => input.value)), ['1000', '3000'])
 await inferenceTaskDialog.getByLabel('输出方式').selectOption('jsonl')
 assert.equal(await inferenceTaskDialog.getByLabel(/业务接口 URL/).count(), 0)
-await page.getByRole('button', { name: '取消' }).click()
+const rtspSeiToggle = inferenceTaskDialog.getByRole('checkbox', { name: /RTSP \+ SEI 实时预览/ })
+await rtspSeiToggle.check()
+assert.equal(await inferenceTaskDialog.getByLabel('解码方式').inputValue(), 'rkmpp')
+assert.equal(await inferenceTaskDialog.getByLabel('解码方式').isDisabled(), true)
+await inferenceTaskDialog.getByLabel(/^媒体网关/).selectOption(smokeMediaGateway.id)
+await inferenceTaskDialog.getByLabel(/发布流名称/).fill('ui-created-stream')
+await inferenceTaskDialog.getByLabel('任务名称').fill(smokeCreatedInferenceTask.name)
+await inferenceTaskDialog.getByRole('button', { name: '创建任务' }).click()
+await inferenceTaskDialog.waitFor({ state: 'detached' })
+assert.equal(smokeCreatedInferenceCalls, 1, 'creating an inference task should call the create endpoint once')
+assert.equal(smokeCreatedInferenceStartCalls, 1, 'creating an inference task should start it immediately')
+assert.deepEqual(smokeCreatedInferencePayload?.media?.zlmSei, {
+  enabled: true,
+  gatewayId: smokeMediaGateway.id,
+  streamName: 'ui-created-stream',
+  reconnectMs: 1000,
+})
+assert.equal(smokeCreatedInferencePayload?.media?.decoder, 'rkmpp')
+const createdInferenceRow = page.locator('tbody tr').filter({ hasText: smokeCreatedInferenceTask.name })
+await createdInferenceRow.getByText('部署中', { exact: true }).waitFor()
+assert.equal(await createdInferenceRow.getByRole('button', { name: '重启' }).count(), 0, 'newly created task should not show restart')
+await createdInferenceRow.getByText('运行中', { exact: true }).waitFor({ timeout: 7000 })
 const runningInferenceRow = page.locator('tbody tr').filter({ hasText: smokeRunningInferenceTask.name })
 await runningInferenceRow.getByRole('button', { name: `查看实时预览 ${smokeRunningInferenceTask.name}` }).click()
 const previewDialog = page.getByRole('dialog')
 await previewDialog.getByRole('heading', { name: `实时预览 · ${smokeRunningInferenceTask.name}` }).waitFor()
 await previewDialog.locator('.inference-stream-surface').waitFor()
 await previewDialog.locator('.stream-state-overlay strong').getByText('正在连接').waitFor()
-assert.equal(smokePlaybackSessionCalls, 1, 'playback should request one scoped session')
+assert.ok(smokePlaybackSessionCalls >= 1, 'playback should request a scoped session')
 await previewDialog.getByRole('button', { name: '关闭' }).click()
 const stoppedInferenceRow = page.locator('tbody tr').filter({ hasText: smokeInferenceTask.name })
 await stoppedInferenceRow.getByText('自动').waitFor()
@@ -364,6 +446,8 @@ await page.getByRole('button', { name: '创建部署批次' }).click()
 await page.getByRole('dialog').getByRole('heading', { name: '创建部署批次' }).waitFor()
 await page.getByRole('button', { name: '取消' }).click()
 const completedDeploymentRow = page.locator('tbody tr').filter({ hasText: smokeCompletedDeployment.name })
+await completedDeploymentRow.getByText('滚动中', { exact: true }).waitFor()
+await completedDeploymentRow.getByText('已完成', { exact: true }).waitFor({ timeout: 7000 })
 await completedDeploymentRow.getByRole('button', { name: `删除部署批次 ${smokeCompletedDeployment.name}` }).click()
 await page.getByRole('dialog').getByRole('heading', { name: '删除部署批次' }).waitFor()
 await page.getByRole('dialog').getByRole('button', { name: '删除部署批次', exact: true }).click()

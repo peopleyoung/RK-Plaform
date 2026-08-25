@@ -1653,6 +1653,7 @@ class InferenceService:
                         analytics=task.analytics_json,
                         npu_core_mask=NpuCoreMask(task.npu_core_mask),
                         npu_core_policy=NpuCorePolicy(task.npu_core_policy),
+                        config_revision=task.config_revision,
                         context_count=task.context_count,
                         worker_count=task.worker_count,
                     )

@@ -96,6 +96,40 @@ def test_prepare_revision_shares_instance_and_generates_task_pipelines(tmp_path:
     assert all("preview" not in item for item in pipelines)
 
 
+def test_prepare_revision_uses_each_task_config_revision_for_result_sinks(tmp_path: Path) -> None:
+    release = _release(tmp_path, adapter="yolo_dfl_split_v1")
+    tasks = release["tasks"]
+    assert isinstance(tasks, list)
+    assert isinstance(tasks[0], dict)
+    assert isinstance(tasks[1], dict)
+    tasks[0].update(
+        {
+            "configRevision": 11,
+            "media": {
+                "decoder": "rkmpp",
+                "zlmSei": {
+                    "enabled": True,
+                    "publishUri": "rtsp://gateway/live/task_a",
+                },
+            },
+        }
+    )
+    tasks[1]["configRevision"] = 12
+
+    revision, _ = prepare_revision([release], 20, tmp_path / "runtime", tmp_path / "output")
+
+    pipelines = {
+        item["result"]["task_id"]: item
+        for item in (
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in (revision / "pipelines").glob("*.yaml")
+        )
+    }
+    assert pipelines["task_a"]["result"]["revision"] == 11
+    assert pipelines["task_a"]["zlm_sei"]["revision"] == 11
+    assert pipelines["task_b"]["result"]["revision"] == 12
+
+
 def test_prepare_revision_groups_tasks_by_context_worker_pool(tmp_path: Path) -> None:
     release = _release(tmp_path)
     tasks = release["tasks"]

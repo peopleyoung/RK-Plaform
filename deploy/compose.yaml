@@ -16,7 +16,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.api
-    image: rknode-platform-api:2026.08.24
+    image: rknode-platform-api:2026.08.25
     restart: unless-stopped
     environment:
       RKNODE_ENVIRONMENT: production
@@ -47,7 +47,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.frontend
-    image: rknode-platform-web:2026.08.24
+    image: rknode-platform-web:2026.08.25
     restart: unless-stopped
     depends_on:
       api:
