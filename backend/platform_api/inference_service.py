@@ -1264,15 +1264,42 @@ class InferenceService:
                 **payload.metadata,
                 "metrics": payload.metrics,
             }
-            self._reconcile_task_revisions(session, record, payload)
+            self._reconcile_task_revisions(
+                session,
+                record,
+                actual_revision=payload.actual_revision,
+                failed_revision=payload.failed_revision,
+            )
             self._finish_stopped_rollbacks(session, record)
             return self._node_response(record)
+
+    def reconcile_direct_revision(
+        self,
+        node_id: str,
+        *,
+        actual_revision: int,
+        failed_revision: int | None,
+    ) -> int:
+        with self.context.database.session() as session:
+            node = self._node(session, node_id)
+            bounded_actual = min(max(0, actual_revision), node.desired_revision)
+            node.actual_revision = bounded_actual
+            self._reconcile_task_revisions(
+                session,
+                node,
+                actual_revision=bounded_actual,
+                failed_revision=failed_revision,
+            )
+            self._finish_stopped_rollbacks(session, node)
+            return node.desired_revision
 
     def _reconcile_task_revisions(
         self,
         session: Session,
         node: InferenceNodeRecord,
-        payload: InferenceNodeHeartbeat,
+        *,
+        actual_revision: int,
+        failed_revision: int | None,
     ) -> None:
         deploying = session.scalars(
             select(InferenceTaskRecord).where(
@@ -1281,23 +1308,130 @@ class InferenceService:
             )
         ).all()
         for task in deploying:
-            tracked = session.scalar(
-                select(DeploymentTargetRecord.id).where(
+            target = session.scalar(
+                select(DeploymentTargetRecord).where(
                     DeploymentTargetRecord.node_id == node.id,
                     DeploymentTargetRecord.task_id == task.id,
                     DeploymentTargetRecord.desired_revision == task.config_revision,
                 )
             )
-            if tracked is not None:
+            if failed_revision == task.config_revision:
+                message = f"Revision {task.config_revision} failed on the inference node"
+                if target is None:
+                    task.status = InferenceTaskStatus.FAILED.value
+                    task.error_message = message
+                    node.deployment_status = "failed"
+                else:
+                    deployment = self._deployment(session, target.deployment_id)
+                    self._fail_deployment_target(
+                        session,
+                        node,
+                        target,
+                        task,
+                        deployment,
+                        message=message,
+                        error_code="revision_apply_failed",
+                    )
                 continue
-            if payload.failed_revision == task.config_revision:
-                task.status = InferenceTaskStatus.FAILED.value
-                task.error_message = f"Revision {task.config_revision} failed on the inference node"
-                node.deployment_status = "failed"
-            elif payload.actual_revision >= task.config_revision:
+            if target is not None:
+                if actual_revision >= task.config_revision:
+                    deployment = self._deployment(session, target.deployment_id)
+                    self._complete_deployment_target(
+                        session,
+                        node,
+                        target,
+                        task,
+                        deployment,
+                        message=f"Revision {task.config_revision} is active on the inference node",
+                    )
+                continue
+            if actual_revision >= task.config_revision:
                 task.status = InferenceTaskStatus.RUNNING.value
                 task.error_message = None
                 node.deployment_status = "idle"
+
+    def _fail_deployment_target(
+        self,
+        session: Session,
+        node: InferenceNodeRecord,
+        target: DeploymentTargetRecord,
+        task: InferenceTaskRecord,
+        deployment: DeploymentRecord,
+        *,
+        message: str,
+        error_code: str,
+        progress: int = 0,
+    ) -> None:
+        target.started_at = target.started_at or utc_now()
+        target.state = DeploymentTargetState.FAILED.value
+        target.progress = progress
+        target.stage = "failed"
+        target.error_code = error_code
+        target.error_message = message
+        target.completed_at = utc_now()
+        if (
+            target.previous_task_status in ACTIVE_TASK_STATUSES
+            and target.previous_release_id
+            and target.previous_graph_revision_id
+            and target.previous_graph_snapshot_json
+        ):
+            task.release_id = target.previous_release_id
+            target.release_id = target.previous_release_id
+            target.graph_revision_id = target.previous_graph_revision_id
+            target.graph_snapshot_json = target.previous_graph_snapshot_json
+            target.graph_hash = target.previous_graph_hash
+            task.status = InferenceTaskStatus.DEGRADED.value
+        else:
+            task.status = InferenceTaskStatus.FAILED.value
+        task.error_message = message
+        deployment.status = (
+            DeploymentStatus.FAILED.value
+            if deployment.strategy == "all_at_once"
+            else DeploymentStatus.PAUSED.value
+        )
+        node.deployment_status = "failed"
+        self._event(
+            session,
+            deployment,
+            "target_progress",
+            message,
+            level="error",
+            target=target,
+            data={"progress": progress, "state": DeploymentTargetState.FAILED.value},
+        )
+
+    def _complete_deployment_target(
+        self,
+        session: Session,
+        node: InferenceNodeRecord,
+        target: DeploymentTargetRecord,
+        task: InferenceTaskRecord,
+        deployment: DeploymentRecord,
+        *,
+        message: str,
+        stage: str = "healthy",
+    ) -> None:
+        target.started_at = target.started_at or utc_now()
+        target.state = DeploymentTargetState.HEALTHY.value
+        target.progress = 100
+        target.stage = stage
+        target.error_code = None
+        target.error_message = None
+        target.completed_at = utc_now()
+        task.status = InferenceTaskStatus.RUNNING.value
+        task.error_message = None
+        if deployment.status == DeploymentStatus.ROLLING_BACK.value:
+            target.state = DeploymentTargetState.ROLLED_BACK.value
+        self._event(
+            session,
+            deployment,
+            "target_progress",
+            message,
+            level="info",
+            target=target,
+            data={"progress": 100, "state": target.state},
+        )
+        self._advance_deployment(session, deployment, node, target.desired_revision)
 
     def approve_node(self, node_id: str) -> InferenceNodeResponse:
         with self.context.database.session() as session:
@@ -1960,50 +2094,44 @@ class InferenceService:
             target.error_message = payload.error_message
             deployment = self._deployment(session, target.deployment_id)
             task = self._task(session, target.task_id)
-            event_level = "error" if requested_state == DeploymentTargetState.FAILED else "info"
-            self._event(
-                session,
-                deployment,
-                "target_progress",
-                payload.message or payload.stage,
-                level=event_level,
-                target=target,
-                data={"progress": payload.progress, "state": requested_state.value},
-            )
             if requested_state == DeploymentTargetState.FAILED:
-                target.completed_at = utc_now()
-                if (
-                    target.previous_task_status in ACTIVE_TASK_STATUSES
-                    and target.previous_release_id
-                    and target.previous_graph_revision_id
-                    and target.previous_graph_snapshot_json
-                ):
-                    task.release_id = target.previous_release_id
-                    target.release_id = target.previous_release_id
-                    target.graph_revision_id = target.previous_graph_revision_id
-                    target.graph_snapshot_json = target.previous_graph_snapshot_json
-                    target.graph_hash = target.previous_graph_hash
-                    task.status = InferenceTaskStatus.DEGRADED.value
-                else:
-                    task.status = InferenceTaskStatus.FAILED.value
-                task.error_message = payload.error_message or payload.message
-                deployment.status = (
-                    DeploymentStatus.FAILED.value
-                    if deployment.strategy == "all_at_once"
-                    else DeploymentStatus.PAUSED.value
+                self._fail_deployment_target(
+                    session,
+                    node,
+                    target,
+                    task,
+                    deployment,
+                    message=(
+                        payload.error_message
+                        or payload.message
+                        or f"Revision {payload.revision} failed on the inference node"
+                    ),
+                    error_code=payload.error_code or "deployment_target_failed",
+                    progress=payload.progress,
                 )
-                node.deployment_status = "failed"
             elif requested_state in {
                 DeploymentTargetState.HEALTHY,
                 DeploymentTargetState.ROLLED_BACK,
             }:
-                target.progress = 100
-                target.completed_at = utc_now()
-                task.status = InferenceTaskStatus.RUNNING.value
-                task.error_message = None
-                if deployment.status == DeploymentStatus.ROLLING_BACK.value:
-                    target.state = DeploymentTargetState.ROLLED_BACK.value
-                self._advance_deployment(session, deployment, node, target.desired_revision)
+                self._complete_deployment_target(
+                    session,
+                    node,
+                    target,
+                    task,
+                    deployment,
+                    message=payload.message or payload.stage,
+                    stage=payload.stage,
+                )
+            else:
+                self._event(
+                    session,
+                    deployment,
+                    "target_progress",
+                    payload.message or payload.stage,
+                    level="info",
+                    target=target,
+                    data={"progress": payload.progress, "state": requested_state.value},
+                )
             return deployment_target_response(target)
 
     def artifact_for_node(self, node_id: str, artifact_id: str, token: str) -> ArtifactRecord:

@@ -29,7 +29,7 @@ docker compose -f deploy/compose.yaml up -d --no-build
 
 服务地址不是 RKNODE_PLATFORM_URL：平台登记训练地址为 172.16.66.249:10081，板端直连地址为 172.30.82.12:10081/10082。当前运行环境仍通过中央主机上的 SSH 隧道 `172.29.0.1:11081`（转换）和 `172.29.0.1:11082`（推理）探活；这是现网连接方式，隧道断开时节点会离线。直连端口恢复后，应将平台 Endpoint 切换到板端直连地址。
 
-当前在线镜像矩阵为：API/Web `2026.08.25`、Media `2026.08.24`、RK3588 转换/推理 `2026.08.25-business`、Torch CPU 训练 `2026.08.24`。离线包仍按包内 `deploy/offline/VERSION` 和 `manifest.json` 管理，不要把在线标签直接填入旧离线包。
+当前在线和离线模板镜像矩阵为：API/Web/Media/训练 `2026.08.26`、RK3588 转换/推理 `2026.08.26-business`。RK3588 C++ pipeline 与节点镜像同为 `2026.08.26-business`。离线包生成后仍以包内 `VERSION` 和 `manifest.json` 校验，不要混用其他发布线镜像。
 
 ## 3. Torch/Paddle 训练节点
 

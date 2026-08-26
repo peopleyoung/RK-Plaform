@@ -46,7 +46,8 @@ def test_offline_compose_files_never_build_or_pull() -> None:
     for path in runtime_compose_files:
         text = path.read_text(encoding="utf-8")
         assert "pull_policy: never" in text
-        assert re.search(r"image: rknode-.+:2026\.08\.24", text)
+        version = (OFFLINE_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        assert re.search(rf"image: rknode-.+:{re.escape(version)}", text)
 
     trainer = (OFFLINE_ROOT / "trainer" / "compose.yaml").read_text(encoding="utf-8")
     assert 'command: ["python", "-m", "workers.node_service.main"]' in trainer
@@ -97,7 +98,7 @@ def test_offline_compose_profiles_use_fixed_release_tags_and_no_env_files() -> N
         assert "${" not in text
         images = re.findall(r"^\s+image:\s+(.+)$", text, re.MULTILINE)
         for image in images:
-            expected_version = "2026.08.24-business" if path.parent.name == "rk3588" else version
+            expected_version = f"{version}-business" if path.parent.name == "rk3588" else version
             assert image.endswith(f":{expected_version}")
         assert not re.search(r"\b[a-f0-9]{48,}\b", text)
 
@@ -303,7 +304,7 @@ def test_rk3588_delivery_uses_one_image_for_two_container_roles() -> None:
     assert 'io.rknode.face-capabilities="none"' in dockerfile
     assert 'CMD ["python3", "-m", "workers.node_service.main"]' in dockerfile
     assert compose.count("deploy/rk3588/Dockerfile.node") == 1
-    assert compose.count("rknode-rk3588-node:2026.08.25-business") == 2
+    assert compose.count("rknode-rk3588-node:2026.08.26-business") == 2
     assert 'RKNODE_NODE_KIND: converter' in compose
     assert 'RKNODE_NODE_KIND: inference' in compose
     assert 'rknode-rk3588-node:${version}' in build_script

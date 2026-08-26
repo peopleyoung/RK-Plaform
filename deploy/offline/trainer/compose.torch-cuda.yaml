@@ -1,6 +1,6 @@
 services:
   trainer:
-    image: rknode-trainer-torch-cuda12.4:2026.08.24
+    image: rknode-trainer-torch-cuda12.4:2026.08.26
     environment:
       RKNODE_ENDPOINT_ID: replace-with-torch-cuda-endpoint-id
       RKNODE_NODE_NAME: cuda-torch-trainer-01

@@ -934,6 +934,66 @@ def test_failed_inference_task_restart_clears_previous_runtime_error(client: Tes
     assert failed_task["errorMessage"] == "Revision 2 failed on the inference node"
 
 
+def test_heartbeat_failure_closes_tracked_deployment_target(client: TestClient) -> None:
+    release, _ = _published_release(client)
+    node_id, access_token = _register_active_node(client, "deeplab_logits_v1")
+    task = _post_inference_task(
+        client,
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "heartbeat-failed-rollout",
+            "releaseId": release["id"],
+            "nodeId": node_id,
+            "inputUri": "rtsp://camera/heartbeat-failure",
+        },
+    )
+    assert task.status_code == 201, task.text
+    deployment = _post_deployment(
+        client,
+        headers=ADMIN_HEADERS,
+        json={
+            "name": "heartbeat-failed-deployment",
+            "taskIds": [task.json()["id"]],
+            "strategy": "all_at_once",
+        },
+    )
+    assert deployment.status_code == 201, deployment.text
+    target = deployment.json()["targets"][0]
+
+    heartbeat = client.post(
+        f"/api/v1/inference-agent/nodes/{node_id}/heartbeat",
+        headers={"Authorization": f"Bearer {access_token}"},
+        json={
+            "actualRevision": 0,
+            "failedRevision": target["desiredRevision"],
+            "health": "degraded",
+            "selfTestPassed": True,
+        },
+    )
+    assert heartbeat.status_code == 200, heartbeat.text
+
+    listed = client.get(
+        "/api/v1/inference-tasks?page=1&pageSize=20", headers=ADMIN_HEADERS
+    )
+    failed_task = next(
+        item for item in listed.json()["items"] if item["id"] == task.json()["id"]
+    )
+    assert failed_task["status"] == "failed"
+    assert failed_task["errorMessage"] == (
+        f"Revision {target['desiredRevision']} failed on the inference node"
+    )
+
+    failed_deployment = client.get(
+        f"/api/v1/deployments/{deployment.json()['id']}", headers=ADMIN_HEADERS
+    )
+    assert failed_deployment.status_code == 200, failed_deployment.text
+    assert failed_deployment.json()["status"] == "failed"
+    failed_target = failed_deployment.json()["targets"][0]
+    assert failed_target["state"] == "failed"
+    assert failed_target["errorCode"] == "revision_apply_failed"
+    assert failed_target["stage"] == "failed"
+
+
 def test_desired_state_promotes_labels_from_legacy_release_manifest(client: TestClient) -> None:
     release, _ = _published_release(client)
     context = client.app.state.context

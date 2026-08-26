@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
+
+import pytest
 
 
 def test_deeplab_postprocess_cpp_contract(tmp_path: Path) -> None:
     project = Path(__file__).parents[1]
     pipeline = project / "third_party" / "nv_video_pipeline"
-    image = "rknode-rk3588-node:2026.08.24-business"
+    image = os.environ.get(
+        "RKNODE_RK3588_TEST_IMAGE", "rknode-rk3588-node:2026.08.26-business"
+    )
+    if subprocess.run(
+        ["docker", "image", "inspect", image], capture_output=True
+    ).returncode != 0:
+        pytest.skip(f"RK3588 test image is not preloaded: {image}")
     command = " ".join(
         (
             "c++ -std=c++17 -Wall -Wextra -Werror",

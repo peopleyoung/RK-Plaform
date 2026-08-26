@@ -168,7 +168,7 @@ docker compose -p rknode-rk3588 -f compose.yaml ps
 docker compose -p rknode-rk3588 -f compose.yaml logs --tail=200 inference
 ~~~
 
-当前在线发布线为 API/Web `2026.08.25`、Media `2026.08.24`、RK3588 转换/推理 `2026.08.25-business`；训练角色仍为 `2026.08.24`。离线包尚未切换到这条在线发布线，使用前必须核对包内 `VERSION` 与镜像清单。
+当前在线和离线模板发布线为 API/Web/Media/训练 `2026.08.26`、RK3588 转换/推理 `2026.08.26-business`，对应 C++ pipeline 为 `2026.08.26-business`。生成离线包前仍必须核对 `deploy/offline/VERSION`、`manifest.json` 与镜像清单。
 
 ### 旧推理任务迁移
 
@@ -196,3 +196,47 @@ python scripts/migrate_inference_graph_v1.py \
 ## 8. 备份和升级
 
 备份 Compose YAML、平台数据卷、节点数据卷和权限为 0600 的 secret 文件。升级时先执行 docker compose ... config --quiet，再使用 up -d --no-build --force-recreate；不要删除持久化卷。升级后检查平台 ready、节点 enrolled + online、Media RTSP/WS-FLV 和推理设备挂载。
+
+### 当前版本切换记录
+
+当前线上服务已统一到以下标签：
+
+| 服务 | 镜像标签 |
+| --- | --- |
+| 中央 API、Web、Media | `2026.08.26` |
+| RK3588 转换、推理 | `2026.08.26-business` |
+| RK3588 C++ pipeline | `rknode-cpp-runtime-2026.08.26-business` |
+| Torch/Paddle 训练 | `2026.08.26` |
+| 离线模板 `VERSION` | `2026.08.26` |
+
+中央平台升级时只重建项目服务，不删除 `platform-data`、`media-data`、`media-logs` 卷：
+
+~~~bash
+docker compose -f deploy/compose.yaml stop api frontend media
+python3 scripts/configure_media_secrets.py --compose-file deploy/compose.yaml
+docker compose -f deploy/compose.yaml config --quiet
+docker compose -f deploy/compose.yaml up -d --no-build --force-recreate api frontend media
+docker compose -f deploy/compose.yaml ps
+curl -fsS http://127.0.0.1:5173/api/v1/ready
+~~~
+
+`configure_media_secrets.py` 只在占位符存在时生成随机 ZLM 密钥；运行后不要把真实密钥提交到 Git。Media 健康后，在平台对 `gateway_builtin` 执行一次探测，确认状态为 `online`。
+
+RK3588 节点使用同一版本镜像启动两个服务：
+
+~~~bash
+docker compose -p rknode-rk3588 -f deploy/nodes/rk3588/compose.yaml \
+  up -d --no-build --force-recreate converter inference
+docker compose -p rknode-rk3588 -f deploy/nodes/rk3588/compose.yaml ps
+~~~
+
+清理旧标签前先确认没有容器引用旧镜像；本次项目旧标签已删除，不能使用全局 `docker system prune` 代替精确清理：
+
+~~~bash
+docker ps -a --format '{{.Names}}\t{{.Image}}'
+docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^rknode-(platform|trainer|rk3588)'
+# 只删除已确认没有容器引用、且不是当前发布线的旧项目标签
+docker image rm <verified-old-project-image-tag> [...]
+~~~
+
+升级远端节点时，如果仍发现未被容器引用的旧 `rknode-rk3588-node` 标签，确认新容器已在线后再精确删除。删除镜像标签不会删除节点数据卷；如需回滚，应预先导出目标镜像和 Compose 文件。

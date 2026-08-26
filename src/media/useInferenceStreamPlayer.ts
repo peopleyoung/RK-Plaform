@@ -60,6 +60,20 @@ export interface InferenceStreamOptions {
   readonly lines: readonly OverlayLine[]
 }
 
+/**
+ * Task polling replaces the option object even when playback inputs are unchanged.
+ * Keep the player mounted until a playback-relevant value actually changes.
+ */
+export function inferenceStreamOptionsKey(options: InferenceStreamOptions): string {
+  return JSON.stringify({
+    taskId: options.taskId,
+    revision: options.revision,
+    capability: options.capability,
+    areas: options.areas,
+    lines: options.lines,
+  })
+}
+
 const RETRY_DELAYS_MS = [1000, 2000, 4000] as const
 const FRAME_TOLERANCE_SECONDS = 1 / 30
 const METADATA_STALE_SECONDS = 1
@@ -314,6 +328,7 @@ export function useInferenceStreamPlayer(options: InferenceStreamOptions): UseIn
   const [snapshot, setSnapshot] = useState<InferencePlayerSnapshot>({ state: 'connecting', diagnostic: null })
 
   const geometry = useMemo(() => ({ areas: options.areas, lines: options.lines }), [options.areas, options.lines])
+  const optionsKey = useMemo(() => inferenceStreamOptionsKey(options), [options])
 
   useEffect(() => {
     let mounted = true
@@ -354,7 +369,7 @@ export function useInferenceStreamPlayer(options: InferenceStreamOptions): UseIn
       controller.stop()
       if (controllerRef.current === controller) controllerRef.current = null
     }
-  }, [geometry, options])
+  }, [optionsKey])
 
   const retry = useCallback(() => controllerRef.current?.retryNow(), [])
   const stop = useCallback(() => controllerRef.current?.stop(), [])

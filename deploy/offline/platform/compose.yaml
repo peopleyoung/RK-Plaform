@@ -12,7 +12,7 @@ x-rknode-logging: &rknode-logging
 
 services:
   api:
-    image: rknode-platform-api:2026.08.24
+    image: rknode-platform-api:2026.08.26
     pull_policy: never
     restart: unless-stopped
     environment:
@@ -41,7 +41,7 @@ services:
       retries: 6
 
   frontend:
-    image: rknode-platform-web:2026.08.24
+    image: rknode-platform-web:2026.08.26
     pull_policy: never
     restart: unless-stopped
     depends_on:
@@ -52,7 +52,7 @@ services:
     logging: *rknode-logging
 
   media:
-    image: rknode-platform-media:2026.08.24
+    image: rknode-platform-media:2026.08.26
     pull_policy: never
     restart: unless-stopped
     depends_on:

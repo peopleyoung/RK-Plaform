@@ -9,7 +9,7 @@ services:
         TORCH_VERSION: 2.5.1+cu124
         TORCHVISION_VERSION: 0.20.1+cu124
         PYTHON_INDEX_URL: https://pypi.org/simple
-    image: rknode-trainer-torch-cuda12.4:2026.08.24
+    image: rknode-trainer-torch-cuda12.4:2026.08.26
     environment:
       RKNODE_ENDPOINT_ID: replace-with-torch-cuda-endpoint-id
       RKNODE_NODE_NAME: cuda-torch-trainer-01

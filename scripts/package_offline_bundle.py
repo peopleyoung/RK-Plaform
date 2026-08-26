@@ -44,7 +44,7 @@ SPECS = {
         ("compose.yaml",),
         "platform",
         "rknode-platform",
-        "2026.08.24",
+        "2026.08.26",
     ),
     "converter-rk3588-arm64": BundleSpec(
         "arm64",
@@ -53,7 +53,7 @@ SPECS = {
         ("compose.converter.yaml", "compose.enrollment.converter.yaml"),
         "converter",
         "rknode-converter",
-        "2026.08.24-business",
+        "2026.08.26-business",
     ),
     "inference-rk3588-arm64": BundleSpec(
         "arm64",
@@ -62,7 +62,7 @@ SPECS = {
         ("compose.inference.yaml", "compose.enrollment.inference.yaml"),
         "inference",
         "rknode-inference",
-        "2026.08.24-business",
+        "2026.08.26-business",
     ),
     "rk3588-node-arm64": BundleSpec(
         "arm64",
@@ -71,7 +71,7 @@ SPECS = {
         ("compose.converter.yaml", "compose.inference.yaml", "compose.enrollment.yaml"),
         "rk3588",
         "rknode-rk3588",
-        "2026.08.24-business",
+        "2026.08.26-business",
     ),
 }
 

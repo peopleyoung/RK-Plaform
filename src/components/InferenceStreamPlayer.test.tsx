@@ -8,6 +8,7 @@ import type { InferencePlaybackSession, PreviewCapability } from '../types'
 import type { RawSeiPayload } from '../media/contracts'
 import {
   InferenceStreamController,
+  inferenceStreamOptionsKey,
   type InferenceStreamDependencies,
   type StreamAdapter,
   type VideoFrameTarget,
@@ -229,5 +230,18 @@ describe('InferenceStreamPlayer state machine', () => {
     expect(first.controller.snapshot.state).toBe('reconnecting')
     expect(second.adapters[0].destroy).not.toHaveBeenCalled()
     expect(second.fetchPlaybackSession).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the playback signature stable when polling replaces equivalent task objects', () => {
+    const first: Parameters<typeof inferenceStreamOptionsKey>[0] = {
+      taskId: 'task-1',
+      revision: 7,
+      capability: available,
+      areas: [],
+      lines: [],
+    }
+    const second = JSON.parse(JSON.stringify(first)) as typeof first
+
+    expect(inferenceStreamOptionsKey(second)).toBe(inferenceStreamOptionsKey(first))
   })
 })

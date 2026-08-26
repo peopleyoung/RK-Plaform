@@ -101,7 +101,7 @@ def test_online_compose_owns_media_ports_health_and_secret_boundaries() -> None:
     services = compose["services"]
     assert set(services) == {"api", "frontend", "media"}
     media = services["media"]
-    assert media["image"] == "rknode-platform-media:2026.08.24"
+    assert media["image"] == "rknode-platform-media:2026.08.26"
     assert media["ports"] == ["8554:554", "8081:80"]
     assert media["restart"] == "unless-stopped"
     assert "healthcheck" in media
@@ -206,3 +206,30 @@ def test_api_bootstraps_builtin_gateway_without_overwriting_operator_identity(
         assert gateway["apiHost"] == "media"
         assert gateway["apiSecretConfigured"] is True
         assert gateway["hookIdentityConfigured"] is True
+
+
+def test_api_bootstrap_preserves_persisted_media_secrets_when_compose_uses_placeholders(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        data_dir=tmp_path,
+        database_url=f"sqlite:///{tmp_path / 'platform.db'}",
+        model_profiles_path=ROOT / "config" / "model_profiles.json",
+        admin_token="test-admin-token",
+        worker_token="test-worker-token",
+        direct_dispatch_enabled=False,
+        media_builtin_enabled=True,
+        media_publish_host="192.0.2.10",
+        media_playback_host="192.0.2.11",
+        zlm_api_secret=SecretStr("replace-with-zlm-api-secret"),
+        zlm_hook_identity=SecretStr("replace-with-zlm-hook-identity"),
+    )
+    with TestClient(create_app(settings)) as client:
+        context = client.app.state.context
+        context.media_secrets.write_api_secret("gateway_builtin", "a" * 64)
+        context.media_secrets.write_hook_identity("gateway_builtin", "b" * 64)
+
+    with TestClient(create_app(settings)) as client:
+        context = client.app.state.context
+        assert context.media_secrets.api_secret("gateway_builtin") == "a" * 64
+        assert context.media_secrets.hook_identity("gateway_builtin") == "b" * 64

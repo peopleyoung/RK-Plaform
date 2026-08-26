@@ -6,7 +6,7 @@ x-rknode-logging: &rknode-logging
 
 services:
   inference:
-    image: rknode-rk3588-node:2026.08.24-business
+    image: rknode-rk3588-node:2026.08.26-business
     pull_policy: never
     init: true
     restart: unless-stopped
@@ -35,7 +35,7 @@ services:
       RKNODE_HARDWARE_ID: rk3588-board-01
       RKNODE_RUNTIME_VERSION: rknn-runtime-2.3.2
       RKNODE_DRIVER_VERSION: replace-with-board-driver-version
-      RKNODE_PIPELINE_VERSION: rknode-cpp-runtime-2026.08.24-business
+      RKNODE_PIPELINE_VERSION: rknode-cpp-runtime-2026.08.26-business
       RKNODE_ADAPTERS: yolo_dfl_split_v1,deeplab_logits_v1,ppocr_db_det_v1,ppocr_ctc_rec_v1
       RKNODE_MODEL_DIR: /data/models
       RKNODE_STATE_DIR: /data/state

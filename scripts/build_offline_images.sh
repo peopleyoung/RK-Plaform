@@ -28,10 +28,10 @@ fi
 
 default_version() {
   case "$1" in
-    platform) echo "2026.08.24" ;;
-    trainer-*) echo "2026.08.24" ;;
-    converter|inference|rk3588) echo "2026.08.24-business" ;;
-    *) echo "2026.08.24" ;;
+    platform) echo "2026.08.26" ;;
+    trainer-*) echo "2026.08.26" ;;
+    converter|inference|rk3588) echo "2026.08.26-business" ;;
+    *) echo "2026.08.26" ;;
   esac
 }
 

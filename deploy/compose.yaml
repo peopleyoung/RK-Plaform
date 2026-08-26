@@ -16,7 +16,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.api
-    image: rknode-platform-api:2026.08.25
+    image: rknode-platform-api:2026.08.26
     restart: unless-stopped
     environment:
       RKNODE_ENVIRONMENT: production
@@ -47,7 +47,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.frontend
-    image: rknode-platform-web:2026.08.25
+    image: rknode-platform-web:2026.08.26
     restart: unless-stopped
     depends_on:
       api:
@@ -62,7 +62,7 @@ services:
       dockerfile: deploy/media/Dockerfile
       args:
         ZLM_BASE_IMAGE: zlmediakit/zlmediakit@sha256:a9cb0166409bdd8f473162eb2fcb12d15206f98daeeeec36606072e5a352af15
-    image: rknode-platform-media:2026.08.24
+    image: rknode-platform-media:2026.08.26
     restart: unless-stopped
     depends_on:
       api:

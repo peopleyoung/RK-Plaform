@@ -27,7 +27,7 @@ Capture -> 主推理 -> [ByteTrack] -> [二级推理] -> [区域/越线] -> [事
 
 新任务只接受 `graph` 契约，不接受顶层 `releaseId`、`media` 或 `analytics`。保存任务只生成草稿和不可变图修订，必须另行创建部署批次才能下发。旧任务不会自动转换，升级前按 [系统指南](docs/system-guide.md#旧推理任务迁移) 执行备份和显式清理。
 
-当前在线部署版本为 API/Web `2026.08.25`、Media `2026.08.24`、RK3588 转换/推理 `2026.08.25-business`；训练镜像仍按角色使用 `2026.08.24`。离线包版本独立维护，执行前以包内 `VERSION` 和 `manifest.json` 为准。
+当前在线和离线模板版本为 API/Web/Media/训练 `2026.08.26`、RK3588 转换/推理 `2026.08.26-business`，对应 C++ pipeline 为 `2026.08.26-business`；生成或部署离线包前仍以包内 `VERSION` 和 `manifest.json` 为准。
 
 ## 3. 中央平台
 

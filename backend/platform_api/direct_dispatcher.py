@@ -17,7 +17,6 @@ from .contracts import (
     ServiceEndpointKind,
 )
 from .db_models import (
-    InferenceNodeRecord,
     JobRecord,
     NodeCleanupRecord,
     ServiceEndpointRecord,
@@ -212,21 +211,22 @@ class DirectNodeDispatcher:
             else None
         )
         actual_revision = 0
+        failed_revision: int | None = None
         if isinstance(inference, dict):
             actual_revision = self._integer(
                 cast(dict[str, Any], inference).get("actualRevision"), 0
             )
-        with self.context.database.session() as session:
-            node = session.get(InferenceNodeRecord, node_id)
-            if node is None:
-                return
-            desired_revision = node.desired_revision
-            node.actual_revision = min(actual_revision, desired_revision)
+            failed_revision = self._optional_integer(
+                cast(dict[str, Any], inference).get("failedRevision")
+            )
+        desired_revision = InferenceService(self.context).reconcile_direct_revision(
+            node_id,
+            actual_revision=actual_revision,
+            failed_revision=failed_revision,
+        )
         if desired_revision == actual_revision:
             return
-        if isinstance(inference, dict) and self._integer(
-            cast(dict[str, Any], inference).get("failedRevision"), -1
-        ) == desired_revision:
+        if failed_revision == desired_revision:
             return
         agent_token = self.context.node_secrets.read(endpoint.id, purpose="agent")
         if not agent_token:
@@ -294,3 +294,11 @@ class DirectNodeDispatcher:
         if isinstance(value, str) and value.isdigit():
             return max(0, int(value))
         return default
+
+    @staticmethod
+    def _optional_integer(value: object) -> int | None:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return max(0, value)
+        if isinstance(value, str) and value.isdigit():
+            return max(0, int(value))
+        return None

@@ -17,7 +17,7 @@ x-rknode-build: &rknode-build
 services:
   converter:
     build: *rknode-build
-    image: rknode-rk3588-node:2026.08.25-business
+    image: rknode-rk3588-node:2026.08.26-business
     restart: unless-stopped
     ports:
       - "10081:10081"
@@ -48,7 +48,7 @@ services:
 
   inference:
     build: *rknode-build
-    image: rknode-rk3588-node:2026.08.25-business
+    image: rknode-rk3588-node:2026.08.26-business
     init: true
     restart: unless-stopped
     ports:
@@ -76,7 +76,7 @@ services:
       RKNODE_HARDWARE_ID: rk3588-direct-01
       RKNODE_RUNTIME_VERSION: rknn-runtime-2.3.2
       RKNODE_DRIVER_VERSION: rknpu-0.9.8
-      RKNODE_PIPELINE_VERSION: rknode-cpp-runtime-2026.08.25-business
+      RKNODE_PIPELINE_VERSION: rknode-cpp-runtime-2026.08.26-business
       RKNODE_ADAPTERS: yolo_dfl_split_v1,deeplab_logits_v1,ppocr_db_det_v1,ppocr_ctc_rec_v1
       RKNODE_MODEL_DIR: /data/models
       RKNODE_STATE_DIR: /data/state

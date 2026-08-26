@@ -8,11 +8,13 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
 
+import pytest
 from backend.platform_api.context import AppContext
 from backend.platform_api.direct_dispatcher import DirectNodeDispatcher
 from fastapi.testclient import TestClient
 
 from .conftest import ADMIN_HEADERS, zip_dataset_bytes
+from .test_inference_api import _post_deployment, _post_inference_task, _published_release
 
 NODE_TOKEN = "direct-node-test-token-with-32-characters"
 
@@ -167,6 +169,82 @@ def test_direct_inference_endpoint_is_probed_and_creates_internal_node(
         assert direct_node["driverVersion"] == "rknpu-test"
         assert direct_node["pipelineVersion"] == "pipeline-test"
         assert direct_node["selfTestPassed"] is True
+
+
+@pytest.mark.parametrize(
+    ("terminal_state", "expected_task_status", "expected_deployment_status"),
+    [
+        ("healthy", "running", "succeeded"),
+        ("failed", "failed", "failed"),
+    ],
+)
+def test_dispatcher_reconciles_terminal_revision_without_agent_callback(
+    client: TestClient,
+    terminal_state: str,
+    expected_task_status: str,
+    expected_deployment_status: str,
+) -> None:
+    state = NodeState(
+        kind="inference",
+        accelerator="rk3588",
+        capabilities=["deeplab_logits_v1"],
+        inference_status={"configured": True, "actualRevision": 0},
+    )
+    with running_node(state) as (host, port):
+        endpoint = client.post(
+            "/api/v1/service-endpoints",
+            headers=ADMIN_HEADERS,
+            json=inference_payload(host, port),
+        )
+        assert endpoint.status_code == 201, endpoint.text
+        node_id = endpoint.json()["inferenceNodeId"]
+        release, _ = _published_release(client)
+        task = _post_inference_task(
+            client,
+            headers=ADMIN_HEADERS,
+            json={
+                "name": f"direct-{terminal_state}-revision",
+                "releaseId": release["id"],
+                "nodeId": node_id,
+                "inputUri": "rtsp://camera/direct-revision",
+            },
+        )
+        assert task.status_code == 201, task.text
+        deployment = _post_deployment(
+            client,
+            headers=ADMIN_HEADERS,
+            json={
+                "name": f"direct-{terminal_state}-deployment",
+                "taskIds": [task.json()["id"]],
+                "strategy": "all_at_once",
+            },
+        )
+        assert deployment.status_code == 201, deployment.text
+        revision = deployment.json()["targets"][0]["desiredRevision"]
+        state.inference_status = {
+            "configured": True,
+            "actualRevision": revision if terminal_state == "healthy" else 0,
+            **({"failedRevision": revision} if terminal_state == "failed" else {}),
+        }
+
+        DirectNodeDispatcher(cast(AppContext, client.app.state.context)).run_once()
+
+    listed = client.get(
+        "/api/v1/inference-tasks?page=1&pageSize=20", headers=ADMIN_HEADERS
+    )
+    reconciled_task = next(
+        item for item in listed.json()["items"] if item["id"] == task.json()["id"]
+    )
+    assert reconciled_task["status"] == expected_task_status
+    reconciled_deployment = client.get(
+        f"/api/v1/deployments/{deployment.json()['id']}", headers=ADMIN_HEADERS
+    )
+    assert reconciled_deployment.status_code == 200, reconciled_deployment.text
+    assert reconciled_deployment.json()["status"] == expected_deployment_status
+    target = reconciled_deployment.json()["targets"][0]
+    assert target["state"] == terminal_state
+    if terminal_state == "failed":
+        assert target["errorCode"] == "revision_apply_failed"
 
 
 def test_pending_direct_endpoint_is_not_probed(client: TestClient) -> None:

@@ -1,6 +1,6 @@
 services:
   trainer:
-    image: rknode-trainer-paddle-cpu:2026.08.24
+    image: rknode-trainer-paddle-cpu:2026.08.26
     environment:
       RKNODE_ENDPOINT_ID: replace-with-paddle-cpu-endpoint-id
       RKNODE_NODE_NAME: cpu-paddle-trainer-01

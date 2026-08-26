@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 from urllib.parse import parse_qs, quote
 
+from pydantic import SecretStr
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -44,6 +45,22 @@ def _as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
+def _reuse_persisted_secret(
+    configured: SecretStr | None, persisted: str | None
+) -> SecretStr | None:
+    """Do not replace a valid persisted secret with a Compose placeholder."""
+    if configured is None:
+        return SecretStr(persisted) if persisted else None
+    value = configured.get_secret_value()
+    if (
+        value.startswith("replace-with-")
+        and persisted
+        and not persisted.startswith("replace-with-")
+    ):
+        return SecretStr(persisted)
+    return configured
+
+
 class MediaService:
     def __init__(self, context: AppContext) -> None:
         self.context = context
@@ -62,8 +79,14 @@ class MediaService:
             publish_host = (settings.media_publish_host or "").strip()
             playback_host = (settings.media_playback_host or "").strip()
             api_host = settings.media_api_host.strip()
-            api_secret = settings.zlm_api_secret
-            hook_identity = settings.zlm_hook_identity
+            api_secret = _reuse_persisted_secret(
+                settings.zlm_api_secret,
+                self.context.media_secrets.api_secret("gateway_builtin"),
+            )
+            hook_identity = _reuse_persisted_secret(
+                settings.zlm_hook_identity,
+                self.context.media_secrets.hook_identity("gateway_builtin"),
+            )
             if not publish_host or not playback_host or not api_host:
                 raise ValueError(
                     "built-in media gateway requires explicit publish, playback, and API hosts"
